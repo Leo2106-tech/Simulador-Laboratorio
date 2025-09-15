@@ -69,7 +69,7 @@ def render():
         st.title("Configuração da Simulação")
         
         # Este selectbox agora escolhe o *tipo* de ensaio dentro da simulação de capacidade
-        categorias_de_ensaio = ["", "Compressão Triaxial", "Cisalhamento (em breve)"] 
+        categorias_de_ensaio = ["", "Compressão Triaxial", "Caracterização (em breve)"] 
         categoria_selecionada = st.selectbox(
             "Selecione a Categoria de Ensaio:",
             options=categorias_de_ensaio
@@ -78,8 +78,8 @@ def render():
     # --- LÓGICA DA PÁGINA PRINCIPAL ---
     if categoria_selecionada == "Compressão Triaxial":
         render_triaxial()
-    elif categoria_selecionada == "Cisalhamento (em breve)":
-        st.info("A simulação de capacidade para ensaios de Cisalhamento está em desenvolvimento.")
+    elif categoria_selecionada == "Caracterização (em breve)":
+        st.info("A simulação de capacidade para ensaios de Caracterização está em desenvolvimento.")
     else:
         st.info("Por favor, selecione uma categoria de ensaio na barra lateral para configurar a simulação.")
 
