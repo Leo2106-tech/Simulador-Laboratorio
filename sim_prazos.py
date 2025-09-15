@@ -5,7 +5,6 @@ import pandas as pd
 from datetime import date, timedelta
 import json
 import os
-import plotly.express as px
 from google_drive_loader import carregar_e_filtrar_dados
 from param_prazos import simular_prazos_propostas
 
@@ -291,4 +290,5 @@ def render():
                     
                     st.dataframe(df_prazos_formatado, use_container_width=True)
                 
+
                 st.info("Nota: Todos os prazos são uma média considerando os diferentes cenários de fechamento das propostas simuladas.")
