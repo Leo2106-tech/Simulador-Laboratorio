@@ -5,6 +5,7 @@ import streamlit as st
 from style import aplicar_estilo_personalizado
 import sim_capacidade
 import sim_prazos
+import sim_precos
 
 # Configuração da página (sem alterações)
 st.set_page_config(
@@ -75,6 +76,16 @@ if st.session_state.tipo_simulacao is None:
         )
         st.info("Otimize a quantidade de recursos (prensas, bancadas, etc.) para atender a uma demanda dentro de um prazo específico.")
 
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.button(
+                "💰 Pricing Propostas",
+                on_click=set_simulacao,
+                args=('Precos',),
+                use_container_width=True,
+                type="primary"
+            )
+        st.info("Adicione propostas para ter uma combinação de preços que maximiza a receita e a chance de fechamento.")
+
     with col3:
         st.button(
             "🗓️ Simular Prazos",
@@ -83,6 +94,10 @@ if st.session_state.tipo_simulacao is None:
             use_container_width=True
         )
         st.info("Estime o prazo de conclusão de uma carteira de ensaios com a configuração de recursos atual.")
+    
+    #st.markdown("<br>", unsafe_allow_html=True)
+    #c1, c2, c3 = st.columns([0.55, 1, 0.55])
+        
 
 else:
     # --- ESTADO SECUNDÁRIO: MOSTRA A SIMULAÇÃO ESCOLHIDA ---
@@ -90,3 +105,5 @@ else:
         sim_capacidade.render()
     elif st.session_state.tipo_simulacao == 'Prazos':
         sim_prazos.render()
+    elif st.session_state.tipo_simulacao == 'Precos':
+        sim_precos.render()
