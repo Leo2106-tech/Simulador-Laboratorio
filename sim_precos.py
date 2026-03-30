@@ -1,7 +1,7 @@
 # sim_precos.py
 
-import streamlit as st
 import io
+import streamlit as st
 import pandas as pd
 import numpy as np
 from itertools import combinations
@@ -171,8 +171,7 @@ def criar_servico_drive():
         scopes=scopes
     )
 
-    service = build("drive", "v3", credentials=creds)
-    return service
+    return build("drive", "v3", credentials=creds)
 
 
 def buscar_arquivo_na_pasta(service, folder_id: str, file_name: str):
@@ -191,7 +190,6 @@ def buscar_arquivo_na_pasta(service, folder_id: str, file_name: str):
     ).execute()
 
     files = response.get("files", [])
-
     if not files:
         raise FileNotFoundError(
             f"Arquivo '{file_name}' não encontrado na pasta '{folder_id}'."
@@ -213,45 +211,176 @@ def baixar_arquivo_drive_em_memoria(service, file_id: str) -> io.BytesIO:
     return buffer
 
 
+# ============================================================
+# GERAÇÃO DA BASE DO MODELO A PARTIR DA BASE ENSAIOS
+# ============================================================
+def gerar_base_modelo(df_ensaios: pd.DataFrame):
+    col_contrato = "Négocio"
+    col_cliente = "Cliente"
+    col_sigla = "Sigla"
+    col_qtd = "Quantidade"
+    col_valor_unit = "Valor Unitario"
+    col_status = "Status"
+    col_mes = "Mês Ganho/Perdido"
+
+    df = df_ensaios.copy()
+
+    df[col_valor_unit] = df[col_valor_unit].apply(limpar_moeda_br)
+    df[col_sigla] = df[col_sigla].astype(str).str.strip()
+    df[col_cliente] = df[col_cliente].astype(str).str.strip()
+    df[col_mes] = df[col_mes].astype(str).str.strip()
+
+    df = df.dropna(
+        subset=[col_contrato, col_cliente, col_sigla, col_qtd, col_valor_unit, col_status, col_mes]
+    ).copy()
+
+    df = df[df[col_valor_unit] > 0].copy()
+
+    df["target"] = (
+        df[col_status]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .map(lambda x: 1 if x == "GANHO" else 0)
+    )
+
+    df["valor_total_item"] = df[col_qtd] * df[col_valor_unit]
+
+    df_ref = (
+        df.groupby(col_sigla)[col_valor_unit]
+          .apply(calcular_referencia_limpa)
+          .reset_index()
+          .rename(columns={col_valor_unit: "preco_referencia"})
+    )
+
+    tabela_ref = dict(zip(df_ref[col_sigla], df_ref["preco_referencia"]))
+
+    df["preco_referencia"] = df[col_sigla].map(tabela_ref)
+    df["preco_relativo"] = df[col_valor_unit] / df["preco_referencia"]
+    df["preco_relativo"] = df["preco_relativo"].clip(lower=0.1, upper=5.0).fillna(1.0)
+
+    siglas = sorted(df[col_sigla].dropna().unique().tolist())
+
+    linhas_modelo = []
+
+    for id_contrato, grupo in df.groupby(col_contrato):
+        grupo = grupo.copy()
+
+        cliente = grupo[col_cliente].iloc[0]
+        mes = grupo[col_mes].iloc[0]
+
+        valor_total_contrato = grupo["valor_total_item"].sum()
+        qtd_total = grupo[col_qtd].sum()
+        n_siglas = grupo[col_sigla].nunique()
+
+        preco_relativo_medio = grupo["preco_relativo"].mean()
+        preco_relativo_mediano = grupo["preco_relativo"].median()
+        preco_relativo_min = grupo["preco_relativo"].min()
+        preco_relativo_max = grupo["preco_relativo"].max()
+        preco_relativo_std = grupo["preco_relativo"].std(ddof=0) if len(grupo) > 1 else 0.0
+        amplitude_preco_relativo = preco_relativo_max - preco_relativo_min
+
+        target = grupo["target"].max()
+
+        idx_maior = grupo["valor_total_item"].idxmax()
+        valor_maior_item = grupo.loc[idx_maior, "valor_total_item"]
+        maior_item = grupo.loc[idx_maior, col_sigla]
+        participacao_maior_item = (
+            valor_maior_item / valor_total_contrato if valor_total_contrato > 0 else 0.0
+        )
+
+        linha = {
+            "id_contrato": id_contrato,
+            "cliente": cliente,
+            "mes": mes,
+            "valor_total_contrato": valor_total_contrato,
+            "qtd_total": qtd_total,
+            "n_siglas": n_siglas,
+            "preco_relativo_medio": preco_relativo_medio,
+            "preco_relativo_mediano": preco_relativo_mediano,
+            "preco_relativo_min": preco_relativo_min,
+            "preco_relativo_max": preco_relativo_max,
+            "preco_relativo_std": preco_relativo_std,
+            "amplitude_preco_relativo": amplitude_preco_relativo,
+            "target": target,
+            "participacao_maior_item": participacao_maior_item,
+            "maior_item": maior_item
+        }
+
+        valor_total_por_sigla = grupo.groupby(col_sigla)["valor_total_item"].sum().to_dict()
+
+        preco_rel_sigla = {}
+        for sigla in siglas:
+            grupo_sigla = grupo[grupo[col_sigla] == sigla]
+            if len(grupo_sigla) == 0:
+                preco_rel_sigla[sigla] = 0.0
+            else:
+                pesos = grupo_sigla["valor_total_item"].values
+                valores = grupo_sigla["preco_relativo"].values
+
+                if pesos.sum() > 0:
+                    preco_rel_sigla[sigla] = np.average(valores, weights=pesos)
+                else:
+                    preco_rel_sigla[sigla] = grupo_sigla["preco_relativo"].mean()
+
+        for sigla in siglas:
+            nome_sigla = normalizar_nome_coluna(sigla)
+            valor_sigla = valor_total_por_sigla.get(sigla, 0.0)
+
+            linha[f"preco_relativo_{nome_sigla}"] = preco_rel_sigla.get(sigla, 0.0)
+            linha[f"part_valor_{nome_sigla}"] = (
+                valor_sigla / valor_total_contrato if valor_total_contrato > 0 else 0.0
+            )
+
+        linhas_modelo.append(linha)
+
+    df_modelo = pd.DataFrame(linhas_modelo)
+
+    colunas_globais = [
+        "id_contrato",
+        "cliente",
+        "mes",
+        "valor_total_contrato",
+        "qtd_total",
+        "n_siglas",
+        "preco_relativo_medio",
+        "preco_relativo_mediano",
+        "preco_relativo_min",
+        "preco_relativo_max",
+        "preco_relativo_std",
+        "amplitude_preco_relativo",
+        "target",
+        "participacao_maior_item",
+        "maior_item"
+    ]
+
+    outras_colunas = [c for c in df_modelo.columns if c not in colunas_globais]
+    df_modelo = df_modelo[colunas_globais + sorted(outras_colunas)]
+
+    return df, df_ref, df_modelo, tabela_ref, siglas
+
+
+# ============================================================
+# FUNÇÃO PRINCIPAL
+# ============================================================
 @st.cache_resource(show_spinner="Carregando base e treinando modelos...")
 def inicializar_modelo_e_dados():
     service = criar_servico_drive()
 
     folder_id = st.secrets["app_config"]["id_pasta_drive"]
     nome_arquivo = st.secrets["app_config"]["nome_arquivo_xlsx"]
-
     aba_ensaios = st.secrets["app_config"]["nome_aba_ensaios"]
-    aba_modelo = st.secrets["app_config"]["nome_aba_modelo"]
 
     arquivo = buscar_arquivo_na_pasta(service, folder_id, nome_arquivo)
     conteudo_excel = baixar_arquivo_drive_em_memoria(service, arquivo["id"])
 
-    # ==========================================================
-    # 1. BASE ENSAIOS -> PREÇOS DE REFERÊNCIA E LISTA DE SIGLAS
-    # ==========================================================
+    # lê somente BASE ENSAIOS do arquivo do secrets
     df_ensaios = pd.read_excel(conteudo_excel, sheet_name=aba_ensaios)
 
-    df_ensaios["Valor Unitario"] = df_ensaios["Valor Unitario"].apply(limpar_moeda_br)
-    df_ensaios["Sigla"] = df_ensaios["Sigla"].astype(str).str.strip()
-    df_ensaios = df_ensaios[df_ensaios["Valor Unitario"] > 0].copy()
+    # gera BASE DE DADOS MODELO a partir da BASE ENSAIOS
+    df_ensaios_tratado, df_ref, df_modelo, tabela_precos_global, siglas = gerar_base_modelo(df_ensaios)
 
-    df_ref = (
-        df_ensaios.groupby("Sigla")["Valor Unitario"]
-        .apply(calcular_referencia_limpa)
-        .reset_index()
-        .rename(columns={"Valor Unitario": "preco_referencia"})
-    )
-
-    tabela_precos_global = dict(zip(df_ref["Sigla"], df_ref["preco_referencia"]))
-    siglas = sorted(df_ensaios["Sigla"].dropna().unique().tolist())
-
-    # Importante: voltar o ponteiro para o início antes de ler outra aba
-    conteudo_excel.seek(0)
-
-    # ==========================================================
-    # 2. BASE DE DADOS MODELO -> TREINO DOS DOIS MODELOS
-    # ==========================================================
-    df_modelo = pd.read_excel(conteudo_excel, sheet_name=aba_modelo)
+    # treino
     df_modelo = df_modelo.dropna(subset=["target"]).copy()
 
     y = df_modelo["target"].astype(int)
@@ -266,7 +395,6 @@ def inicializar_modelo_e_dados():
         X[col] = pd.to_numeric(X[col], errors="coerce")
 
     X = X.fillna(0)
-
     colunas_treino_global = X.columns.tolist()
 
     neg_global = (y == 0).sum()
@@ -283,7 +411,7 @@ def inicializar_modelo_e_dados():
     )
 
     modelo_logistica = LogisticRegression(
-        max_iter=3000,
+        max_iter=100000,
         class_weight="balanced",
         random_state=42
     )
@@ -294,15 +422,8 @@ def inicializar_modelo_e_dados():
     modelo_xgb.fit(X_bal, y_bal)
     modelo_logistica.fit(X_bal, y_bal)
 
-    # ==========================================================
-    # 3. LISTA DE CLIENTES
-    # ==========================================================
     lista_clientes_bd = sorted(
-        [
-            str(c).strip()
-            for c in df_modelo["cliente"].dropna().unique()
-            if str(c).strip() != ""
-        ]
+        [str(c).strip() for c in df_modelo["cliente"].dropna().unique() if str(c).strip() != ""]
     )
 
     return {
@@ -313,7 +434,10 @@ def inicializar_modelo_e_dados():
         "tabela_precos_global": tabela_precos_global,
         "colunas_treino_global": colunas_treino_global,
         "siglas": siglas,
-        "lista_clientes_bd": lista_clientes_bd
+        "lista_clientes_bd": lista_clientes_bd,
+        "df_modelo": df_modelo,
+        "df_ref": df_ref,
+        "arquivo_drive_usado": arquivo["name"]
     }
 # =========================================================================
 #             FUNÇÕES DA HEURÍSTICA E PROBABILIDADE (NOVA VERSÃO)
@@ -337,6 +461,10 @@ def montar_linha_modelo(
         preco_unit_proposto = ensaio.get("Preco_Unitario", preco_ref)
         if pd.isna(preco_unit_proposto):
             preco_unit_proposto = preco_ref
+
+        if pd.isna(preco_unit_proposto):
+            preco_unit_proposto = 0.0
+
         preco_unit_proposto = float(preco_unit_proposto)
 
         valor_total_item = preco_unit_proposto * qtd
@@ -382,8 +510,8 @@ def montar_linha_modelo(
     )
 
     linha = {
-        "cliente": novo_negocio_info.get("cliente"),
-        "mes": int(novo_negocio_info.get("mes")),
+        "cliente": str(novo_negocio_info.get("cliente", "")).strip(),
+        "mes": str(novo_negocio_info.get("mes", "")).strip(),
         "valor_total_contrato": valor_total_contrato,
         "qtd_total": qtd_total,
         "n_siglas": n_siglas,
@@ -428,7 +556,12 @@ def montar_linha_modelo(
     colunas_categoricas = ["cliente", "maior_item", "mes"]
     colunas_categoricas = [c for c in colunas_categoricas if c in dados_input.columns]
 
-    dados_input = pd.get_dummies(dados_input, columns=colunas_categoricas, drop_first=True)
+    dados_input = pd.get_dummies(
+        dados_input,
+        columns=colunas_categoricas,
+        drop_first=True
+    )
+
     dado_final_modelo = dados_input.reindex(columns=colunas_treino_global, fill_value=0)
 
     return dado_final_modelo
