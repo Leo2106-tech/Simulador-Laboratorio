@@ -459,14 +459,14 @@ def montar_linha_modelo(
         preco_ref = tabela_precos_global.get(sigla, np.nan)
 
         preco_unit_proposto = ensaio.get("Preco_Unitario", preco_ref)
+        preco_unit_proposto = limpar_moeda_br(preco_unit_proposto)
+
         if pd.isna(preco_unit_proposto):
             preco_unit_proposto = preco_ref
-
         if pd.isna(preco_unit_proposto):
             preco_unit_proposto = 0.0
 
         preco_unit_proposto = float(preco_unit_proposto)
-
         valor_total_item = preco_unit_proposto * qtd
 
         if pd.notna(preco_ref) and preco_ref > 0:
@@ -503,15 +503,13 @@ def montar_linha_modelo(
     amplitude_preco_relativo = preco_relativo_max - preco_relativo_min
 
     idx_maior = df_prop["Valor_Total_Item"].idxmax()
-    maior_item = df_prop.loc[idx_maior, "Sigla"]
+    maior_item = str(df_prop.loc[idx_maior, "Sigla"]).strip()
     valor_maior_item = df_prop.loc[idx_maior, "Valor_Total_Item"]
     participacao_maior_item = (
         valor_maior_item / valor_total_contrato if valor_total_contrato > 0 else 0.0
     )
 
     linha = {
-        "cliente": str(novo_negocio_info.get("cliente", "")).strip(),
-        "mes": str(novo_negocio_info.get("mes", "")).strip(),
         "valor_total_contrato": valor_total_contrato,
         "qtd_total": qtd_total,
         "n_siglas": n_siglas,
@@ -522,7 +520,6 @@ def montar_linha_modelo(
         "preco_relativo_std": preco_relativo_std,
         "amplitude_preco_relativo": amplitude_preco_relativo,
         "participacao_maior_item": participacao_maior_item,
-        "maior_item": maior_item,
     }
 
     valor_total_por_sigla = df_prop.groupby("Sigla")["Valor_Total_Item"].sum().to_dict()
@@ -551,18 +548,18 @@ def montar_linha_modelo(
             valor_sigla / valor_total_contrato if valor_total_contrato > 0 else 0.0
         )
 
-    dados_input = pd.DataFrame([linha])
+    cliente = str(novo_negocio_info.get("cliente", "")).strip()
+    mes = str(novo_negocio_info.get("mes", "")).strip()
 
-    colunas_categoricas = ["cliente", "maior_item", "mes"]
-    colunas_categoricas = [c for c in colunas_categoricas if c in dados_input.columns]
+    for col in colunas_treino_global:
+        if col.startswith("cliente_"):
+            linha[col] = 1 if col == f"cliente_{cliente}" else linha.get(col, 0)
+        elif col.startswith("mes_"):
+            linha[col] = 1 if col == f"mes_{mes}" else linha.get(col, 0)
+        elif col.startswith("maior_item_"):
+            linha[col] = 1 if col == f"maior_item_{maior_item}" else linha.get(col, 0)
 
-    dados_input = pd.get_dummies(
-        dados_input,
-        columns=colunas_categoricas,
-        drop_first=True
-    )
-
-    dado_final_modelo = dados_input.reindex(columns=colunas_treino_global, fill_value=0)
+    dado_final_modelo = pd.DataFrame([linha]).reindex(columns=colunas_treino_global, fill_value=0)
 
     return dado_final_modelo
 
