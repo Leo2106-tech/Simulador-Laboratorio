@@ -368,7 +368,7 @@ def inicializar_modelo_e_dados():
     service = criar_servico_drive()
 
     folder_id = st.secrets["app_config"]["id_pasta_drive"]
-    nome_arquivo = st.secrets["app_config"]["nome_arq_xlsx"]
+    nome_arquivo = st.secrets["app_config"]["nome_arq_xls"]
     aba_ensaios = st.secrets["app_config"]["nome_aba_ensaios"]
 
     arquivo = buscar_arquivo_na_pasta(service, folder_id, nome_arquivo)
