@@ -10,9 +10,11 @@ from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
-from imblearn.over_sampling import SMOTE
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 import warnings
+import uuid
 
 warnings.filterwarnings('ignore')
 
@@ -160,15 +162,73 @@ def calcular_referencia_limpa(serie):
 #             FUNÇÕES DE CACHE: ML E PREPARAÇÃO DE DADOS
 # =========================================================================
 
+def criar_servico_drive():
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=scopes
+    )
+
+    service = build("drive", "v3", credentials=creds)
+    return service
+
+
+def buscar_arquivo_na_pasta(service, folder_id: str, file_name: str):
+    query = (
+        f"'{folder_id}' in parents "
+        f"and name = '{file_name}' "
+        f"and trashed = false"
+    )
+
+    response = service.files().list(
+        q=query,
+        fields="files(id, name, mimeType)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
+
+    files = response.get("files", [])
+
+    if not files:
+        raise FileNotFoundError(
+            f"Arquivo '{file_name}' não encontrado na pasta '{folder_id}'."
+        )
+
+    return files[0]
+
+
+def baixar_arquivo_drive_em_memoria(service, file_id: str) -> io.BytesIO:
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+
+    buffer.seek(0)
+    return buffer
+
+
 @st.cache_resource(show_spinner="Carregando base e treinando modelos...")
 def inicializar_modelo_e_dados():
-    url_planilha = "https://docs.google.com/spreadsheets/d/1rE5HiLuMTLXcixvF7Jf24BfzfkfkcuaiNSYvlxylRjk/export?format=xlsx"
+    service = criar_servico_drive()
+
+    folder_id = st.secrets["app_config"]["id_pasta_drive"]
+    nome_arquivo = st.secrets["app_config"]["nome_arquivo_xlsx"]
+
+    aba_ensaios = st.secrets["app_config"]["nome_aba_ensaios"]
+    aba_modelo = st.secrets["app_config"]["nome_aba_modelo"]
+
+    arquivo = buscar_arquivo_na_pasta(service, folder_id, nome_arquivo)
+    conteudo_excel = baixar_arquivo_drive_em_memoria(service, arquivo["id"])
 
     # ==========================================================
     # 1. BASE ENSAIOS -> PREÇOS DE REFERÊNCIA E LISTA DE SIGLAS
     # ==========================================================
-    aba_ensaios = "BASE ENSAIOS"
-    df_ensaios = pd.read_excel(url_planilha, sheet_name=aba_ensaios)
+    df_ensaios = pd.read_excel(conteudo_excel, sheet_name=aba_ensaios)
 
     df_ensaios["Valor Unitario"] = df_ensaios["Valor Unitario"].apply(limpar_moeda_br)
     df_ensaios["Sigla"] = df_ensaios["Sigla"].astype(str).str.strip()
@@ -184,11 +244,13 @@ def inicializar_modelo_e_dados():
     tabela_precos_global = dict(zip(df_ref["Sigla"], df_ref["preco_referencia"]))
     siglas = sorted(df_ensaios["Sigla"].dropna().unique().tolist())
 
+    # Importante: voltar o ponteiro para o início antes de ler outra aba
+    conteudo_excel.seek(0)
+
     # ==========================================================
     # 2. BASE DE DADOS MODELO -> TREINO DOS DOIS MODELOS
     # ==========================================================
-    aba_modelo = "BASE DE DADOS MODELO"
-    df_modelo = pd.read_excel(url_planilha, sheet_name=aba_modelo)
+    df_modelo = pd.read_excel(conteudo_excel, sheet_name=aba_modelo)
     df_modelo = df_modelo.dropna(subset=["target"]).copy()
 
     y = df_modelo["target"].astype(int)
@@ -201,6 +263,7 @@ def inicializar_modelo_e_dados():
 
     for col in X.columns:
         X[col] = pd.to_numeric(X[col], errors="coerce")
+
     X = X.fillna(0)
 
     colunas_treino_global = X.columns.tolist()
@@ -234,7 +297,11 @@ def inicializar_modelo_e_dados():
     # 3. LISTA DE CLIENTES
     # ==========================================================
     lista_clientes_bd = sorted(
-        [str(c).strip() for c in df_modelo["cliente"].dropna().unique() if str(c).strip() != ""]
+        [
+            str(c).strip()
+            for c in df_modelo["cliente"].dropna().unique()
+            if str(c).strip() != ""
+        ]
     )
 
     return {
@@ -677,7 +744,7 @@ def on_change_preco():
     st.session_state.resultado_precos = None
 
 def adicionar_ensaio():
-    st.session_state.ensaios_sim_preco.append({"Sigla": st.session_state.opcoes_siglas[0], "Quantidade": 1})
+    st.session_state.ensaios_sim_preco.append({"id": str(uuid.uuid4()), "Sigla": st.session_state.opcoes_siglas[0], "Quantidade": 1})
     on_change_preco()
 
 def remover_ensaio(idx):
@@ -685,7 +752,7 @@ def remover_ensaio(idx):
     on_change_preco()
 
 def limpar_simulacao():
-    st.session_state.ensaios_sim_preco = [{"Sigla": st.session_state.opcoes_siglas[0], "Quantidade": 1}]
+    st.session_state.ensaios_sim_preco = [{"id": str(uuid.uuid4()), "Sigla": st.session_state.opcoes_siglas[0], "Quantidade": 1}]
     st.session_state.resultado_precos = None
     st.toast("🗑️ Tela limpa.", icon="🗑️")
 
@@ -714,7 +781,8 @@ def render():
         return
 
     # 2. Inicializa o estado
-    st.session_state.setdefault('ensaios_sim_preco', [{"Sigla": st.session_state.opcoes_siglas[0], "Quantidade": 1}])
+    if 'ensaios_sim_preco' not in st.session_state:
+        st.session_state.ensaios_sim_preco = [{"id": str(uuid.uuid4()), "Sigla": st.session_state.opcoes_siglas[0], "Quantidade": 1}]
     st.session_state.setdefault('resultado_precos', None)
 
     # 3. Cabeçalho de Ações
@@ -753,16 +821,19 @@ def render():
         c2.markdown("**Quantidade**")
 
         for idx, ensaio in enumerate(st.session_state.ensaios_sim_preco):
+            if "id" not in ensaio:
+                ensaio["id"] = str(uuid.uuid4())
+            ensaio_id = ensaio["id"]
             col1, col2, col3 = st.columns([4, 2, 1])
             
             idx_sigla = st.session_state.opcoes_siglas.index(ensaio['Sigla']) if ensaio['Sigla'] in st.session_state.opcoes_siglas else 0
-            nova_sigla = col1.selectbox("Sigla", st.session_state.opcoes_siglas, index=idx_sigla, key=f"sigla_{idx}", label_visibility="collapsed", on_change=on_change_preco)
+            nova_sigla = col1.selectbox("Sigla", st.session_state.opcoes_siglas, index=idx_sigla, key=f"sigla_{ensaio_id}", label_visibility="collapsed", on_change=on_change_preco)
             st.session_state.ensaios_sim_preco[idx]['Sigla'] = nova_sigla
             
-            qtd_str = col2.text_input("Qtd", value=str(ensaio['Quantidade']), key=f"qtd_{idx}", label_visibility="collapsed", on_change=on_change_preco)
+            qtd_str = col2.text_input("Qtd", value=str(ensaio['Quantidade']), key=f"qtd_{ensaio_id}", label_visibility="collapsed", on_change=on_change_preco)
             st.session_state.ensaios_sim_preco[idx]['Quantidade'] = int(qtd_str) if qtd_str.isdigit() and int(qtd_str) > 0 else 1
             
-            col3.button("➖", key=f"rem_{idx}", on_click=remover_ensaio, args=(idx,))
+            col3.button("➖", key=f"rem_{ensaio_id}", on_click=remover_ensaio, args=(idx,))
 
         st.button("➕ Adicionar Ensaio", on_click=adicionar_ensaio)
 
