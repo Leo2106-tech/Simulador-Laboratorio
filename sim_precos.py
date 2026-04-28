@@ -1284,7 +1284,7 @@ def heuristica_precos_prob_margem(
     fator_inicial=0.70,
     margem_minima=0.50,
     aliquota_imposto=0.1175,
-    tolerancia_prob=1e-12,
+    tolerancia_prob=1e-6,
     max_iter=500,
     debug=False,
 ):
