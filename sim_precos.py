@@ -56,6 +56,7 @@ PARAMS_XGBOOST = {
     "verbosity": 0,
     "eval_metric": "logloss",
     "use_label_encoder": False,
+    "n_jobs": 1,
 }
 
 
