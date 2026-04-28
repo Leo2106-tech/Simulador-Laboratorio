@@ -979,7 +979,6 @@ def treinar_xgboost_final(X_enc, y):
 # ============================================================
 
 @st.cache_resource(show_spinner="Carregando base e treinando modelo XGBoost...")
-@st.cache_resource(show_spinner="Carregando base e treinando modelo XGBoost...")
 def inicializar_modelo_e_dados():
     service = criar_servico_drive()
 
