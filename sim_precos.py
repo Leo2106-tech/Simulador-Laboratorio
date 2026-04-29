@@ -1,10 +1,12 @@
 # sim_precos.py
 
 import io
+import os
 import re
 import math
 import uuid
 import pickle
+from pathlib import Path
 from itertools import combinations
 
 import streamlit as st
@@ -75,6 +77,38 @@ TABELA_CUSTOS_MEDIA = {
     "ADICIONAL": 588.00737,
     "CAMPO": 3365.11735,
 }
+
+
+TABELA_CUSTOS_MEDIA_NORMALIZADA = {
+    str(k).strip().upper(): float(v)
+    for k, v in TABELA_CUSTOS_MEDIA.items()
+}
+
+
+def obter_custo_unitario(sigla, tabela_custos_global):
+    """
+    Busca custo unitário de forma robusta, mas preserva o valor exato quando
+    a sigla bate diretamente com a tabela.
+    """
+    sigla_str = str(sigla).strip()
+
+    if sigla_str in tabela_custos_global:
+        return float(tabela_custos_global[sigla_str])
+
+    sigla_upper = sigla_str.upper()
+
+    tabela_normalizada = {
+        str(k).strip().upper(): float(v)
+        for k, v in tabela_custos_global.items()
+    }
+
+    if sigla_upper in tabela_normalizada:
+        return float(tabela_normalizada[sigla_upper])
+
+    if sigla_upper in TABELA_CUSTOS_MEDIA_NORMALIZADA:
+        return float(TABELA_CUSTOS_MEDIA_NORMALIZADA[sigla_upper])
+
+    return 0.0
 
 
 # ============================================================
@@ -162,28 +196,149 @@ def transformar_com_preprocessador(preprocessor_fit, X_transform, nomes_features
 
 
 # ============================================================
-# FUNÇÃO PRINCIPAL CACHEADA - CARREGAMENTO DO MODELO LOCAL
+# FUNÇÃO PRINCIPAL CACHEADA - CARREGAMENTO DO MODELO FIXO
 # ============================================================
 
-@st.cache_resource(show_spinner="Carregando o modelo pré-treinado...")
+def _caminhos_possiveis_artefato():
+    """
+    Procura o artefato em caminhos comuns do projeto.
+    Preferência: artefatos_modelo.pkl na raiz.
+    Também aceita artefatos_modelo/modelo_precos_bundle.pkl se você optar por pasta.
+    """
+    base_dir = Path(__file__).resolve().parent
+
+    return [
+        base_dir / "artefatos_modelo.pkl",
+        base_dir / "artefatos_modelo" / "artefatos_modelo.pkl",
+        base_dir / "artefatos_modelo" / "modelo_precos_bundle.pkl",
+
+        # Compatibilidade com o nome digitado anteriormente.
+        # Mantenho como fallback para não quebrar, mas o correto é .pkl.
+        base_dir / "artefatos_modelo.ppkl",
+    ]
+
+
+def _encontrar_artefato_modelo():
+    for caminho in _caminhos_possiveis_artefato():
+        if caminho.exists():
+            return caminho
+
+    caminhos_txt = "\n".join([str(c) for c in _caminhos_possiveis_artefato()])
+
+    raise FileNotFoundError(
+        "Arquivo de artefatos do modelo não encontrado. "
+        "Gere o arquivo com treinar_modelo.py e envie para o GitHub junto com o app.\n\n"
+        "Caminhos procurados:\n"
+        f"{caminhos_txt}"
+    )
+
+
+def _validar_chaves_artefato(dados_ml):
+    chaves_obrigatorias = [
+        "modelo_heuristica",
+        "threshold_heuristica",
+        "tabela_precos_global",
+        "siglas",
+        "lista_clientes_bd",
+        "lista_setores_bd",
+        "lista_minerais_bd",
+        "preprocessador_output_final",
+        "features_output_final",
+        "colunas_categoricas_output_final",
+        "colunas_numericas_output_final",
+    ]
+
+    faltantes = [k for k in chaves_obrigatorias if k not in dados_ml]
+
+    if faltantes:
+        raise KeyError(
+            "O arquivo artefatos_modelo.pkl não contém todas as chaves obrigatórias. "
+            "Gere novamente o pkl com a versão atualizada do treinar_modelo.py. "
+            f"Chaves faltantes: {faltantes}"
+        )
+
+
+def _executar_sanity_check(dados_ml):
+    """
+    Confere se o modelo carregado no Streamlit reproduz a probabilidade salva
+    durante o treino local. Se não reproduzir, é sinal de diferença de ambiente
+    ou incompatibilidade de versões.
+    """
+    if "sanity_raw" in dados_ml and "sanity_prob" in dados_ml:
+        sanity_raw = dados_ml["sanity_raw"]
+        preproc = dados_ml["preprocessador_output_final"]
+        features = dados_ml["features_output_final"]
+        modelo = dados_ml["modelo_heuristica"]
+
+        sanity_transform = preproc.transform(sanity_raw)
+
+        sanity_df = pd.DataFrame(
+            sanity_transform,
+            columns=features,
+            index=sanity_raw.index,
+        )
+
+        for col in sanity_df.columns:
+            sanity_df[col] = pd.to_numeric(sanity_df[col], errors="coerce").fillna(0)
+
+        sanity_df = sanity_df.reindex(columns=features, fill_value=0)
+
+        prob_atual = float(modelo.predict_proba(sanity_df)[0, 1])
+        prob_treino = float(dados_ml["sanity_prob"])
+        diff = abs(prob_atual - prob_treino)
+
+        return {
+            "ok": diff <= 1e-10,
+            "prob_treino": prob_treino,
+            "prob_atual": prob_atual,
+            "diff": diff,
+        }
+
+    if "sanity_enc" in dados_ml and "sanity_prob" in dados_ml:
+        modelo = dados_ml["modelo_heuristica"]
+        sanity_enc = dados_ml["sanity_enc"]
+        prob_atual = float(modelo.predict_proba(sanity_enc)[0, 1])
+        prob_treino = float(dados_ml["sanity_prob"])
+        diff = abs(prob_atual - prob_treino)
+
+        return {
+            "ok": diff <= 1e-10,
+            "prob_treino": prob_treino,
+            "prob_atual": prob_atual,
+            "diff": diff,
+        }
+
+    return None
+
+
+@st.cache_resource(show_spinner="Carregando modelo XGBoost pré-treinado...")
 def inicializar_modelo_e_dados():
-    # Carrega o modelo treinado e salvo pelo script offline
-    with open("artefatos_modelo.ppkl", "rb") as f:
+    """
+    Esta versão NÃO baixa planilha e NÃO treina modelo dentro do Streamlit.
+    Ela apenas carrega o artefato gerado localmente por treinar_modelo.py.
+    """
+    caminho_artefato = _encontrar_artefato_modelo()
+
+    with open(caminho_artefato, "rb") as f:
         dados_ml = pickle.load(f)
 
-    return {
-        "modelo_heuristica": dados_ml["modelo_heuristica"],
-        "threshold_heuristica": dados_ml["threshold_heuristica"],
-        "tabela_precos_global": dados_ml["tabela_precos_global"],
-        "siglas": dados_ml["siglas"],
-        "lista_clientes_bd": dados_ml["lista_clientes_bd"],
-        "lista_setores_bd": dados_ml["lista_setores_bd"],
-        "lista_minerais_bd": dados_ml["lista_minerais_bd"],
-        "preprocessador_output_final": dados_ml["preprocessador_output_final"],
-        "features_output_final": dados_ml["features_output_final"],
-        "colunas_categoricas_output_final": dados_ml["colunas_categoricas_output_final"],
-        "colunas_numericas_output_final": dados_ml["colunas_numericas_output_final"],
-    }
+    _validar_chaves_artefato(dados_ml)
+
+    sanity = _executar_sanity_check(dados_ml)
+
+    if sanity is not None and not sanity["ok"]:
+        st.warning(
+            "⚠️ O modelo carregado não reproduziu exatamente o sanity check salvo no treino. "
+            "Isso indica diferença de ambiente/versões ou artefato incompatível.\n\n"
+            f"Prob treino: {sanity['prob_treino']:.15f}\n"
+            f"Prob atual: {sanity['prob_atual']:.15f}\n"
+            f"Diff: {sanity['diff']:.15f}"
+        )
+
+    dados_ml["caminho_artefato_modelo"] = str(caminho_artefato)
+    dados_ml["sanity_check_streamlit"] = sanity
+
+    return dados_ml
 
 
 # =========================================================================
@@ -429,7 +584,7 @@ def heuristica_precos_prob_margem(
             )
 
         preco_base = float(tabela_precos_global.get(sigla, 0))
-        custo_unitario = float(tabela_custos_global.get(sigla, 0))
+        custo_unitario = obter_custo_unitario(sigla, tabela_custos_global)
 
         if preco_base <= 0:
             raise ValueError(f"Preço base não encontrado ou inválido para '{sigla}'.")
@@ -706,7 +861,7 @@ def analisar_cenario_manual(
         sigla = ensaio["Sigla"]
         qtd = ensaio["Quantidade"]
         preco_unit = ensaio["Preco_Unitario"]
-        custo_unit = float(tabela_custos_global.get(sigla, 0))
+        custo_unit = obter_custo_unitario(sigla, tabela_custos_global)
 
         if custo_unit <= 0:
             raise ValueError(f"Custo não encontrado para o ensaio '{sigla}'.")
@@ -798,13 +953,30 @@ def render():
         colunas_categoricas_output_final = dados_ml["colunas_categoricas_output_final"]
         colunas_numericas_output_final = dados_ml["colunas_numericas_output_final"]
 
-        st.session_state.setdefault(
-            "opcoes_siglas",
-            sorted([s for s in opcoes_siglas if str(s) != "nan"]),
-        )
+        # Atualiza sempre para evitar reaproveitar opções antigas do session_state
+        # depois de trocar o arquivo artefatos_modelo.pkl.
+        st.session_state.opcoes_siglas = sorted([s for s in opcoes_siglas if str(s) != "nan"])
+
+        with st.sidebar.expander("Debug do modelo", expanded=False):
+            st.write("Artefato:", dados_ml.get("caminho_artefato_modelo", "-"))
+
+            metadata = dados_ml.get("metadata")
+            if metadata:
+                st.write("Arquivo treino:", metadata.get("arquivo_drive_name", metadata.get("arquivo_excel", "-")))
+                st.write("ID arquivo:", metadata.get("arquivo_drive_id", "-"))
+                st.write("Shape X_enc:", metadata.get("shape_X_enc", "-"))
+                st.write("Qtd features:", metadata.get("qtd_features", "-"))
+                st.write("XGBoost:", metadata.get("xgboost", "-"))
+                st.write("scikit-learn:", metadata.get("sklearn", "-"))
+
+            sanity = dados_ml.get("sanity_check_streamlit")
+            if sanity:
+                st.write("Sanity prob treino:", sanity.get("prob_treino"))
+                st.write("Sanity prob atual:", sanity.get("prob_atual"))
+                st.write("Sanity diff:", sanity.get("diff"))
 
     except Exception as e:
-        st.error(f"Erro ao carregar o arquivo do modelo (artefatos_modelo.ppkl): {e}")
+        st.error(f"Erro ao carregar o arquivo do modelo (artefatos_modelo.pkl): {e}")
         return
 
     if "ensaios_sim_preco" not in st.session_state:
