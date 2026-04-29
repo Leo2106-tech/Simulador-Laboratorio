@@ -1,0 +1,56 @@
+{
+    "python": "3.13.7",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "pandas": "2.3.2",
+    "numpy": "2.3.3",
+    "sklearn": "1.8.0",
+    "xgboost": "3.2.0",
+    "imbalanced_learn": "0.14.1",
+    "arquivo_drive_name": "Dados Contratos Lab central.xlsx",
+    "arquivo_drive_id": "1u3JmQ8VkBAz1VCSRQb5X4K89Cy3G7Im2",
+    "arquivo_drive_modifiedTime": "2026-04-27T19:42:26.126Z",
+    "aba_ensaios": "BASE ENSAIOS",
+    "shape_df_ensaios": [
+        1123,
+        16
+    ],
+    "shape_df_modelo": [
+        102,
+        116
+    ],
+    "shape_X_raw": [
+        102,
+        114
+    ],
+    "shape_X_enc": [
+        102,
+        245
+    ],
+    "qtd_features": 245,
+    "hash_df_ensaios": "7b331dae708e20a1743303732061fb33153b7a104d1c8c49c78338302c373805",
+    "hash_df_modelo": "93eb9f86a644657b5ae2a2c79d559a765023d167f5bdf554189d69ec07a46117",
+    "hash_X_raw": "6037aab5c33ecfd50e35b0e6721f3b4e338a0b8dc6305406b4acb26b759e0562",
+    "hash_X_enc": "98e8b8fb0eb96c114ee9310f8dec6ac15ef5ab84ed78a75a10421bf2fd22c813",
+    "hash_features": "c757274dcae94fc625a48fd93674ad0b1b97e50abe3a957b12f79ecc54bbe9b6",
+    "hash_tabela_precos_global": "268604754ed971459093d05ca3eeedba32e847186d72d9a2331a7fc5bbf4c8cc",
+    "threshold_xgboost": 0.46702912081635545,
+    "params_xgboost": {
+        "n_estimators": 187,
+        "max_depth": 3,
+        "learning_rate": 0.09680018169570574,
+        "subsample": 0.8840212380369016,
+        "colsample_bytree": 0.6400628095628191,
+        "min_child_weight": 2,
+        "gamma": 0.9946938715788189,
+        "reg_alpha": 0.042879353158190935,
+        "reg_lambda": 0.6815358078376077,
+        "random_state": 42,
+        "verbosity": 0,
+        "eval_metric": "logloss",
+        "use_label_encoder": false,
+        "n_jobs": 1,
+        "tree_method": "hist",
+        "device": "cpu"
+    },
+    "sanity_prob": 0.4444037675857544
+}
