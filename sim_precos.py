@@ -4,60 +4,13 @@ import io
 import re
 import math
 import uuid
-import warnings
+import pickle
 from itertools import combinations
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
-
-from sklearn.model_selection import StratifiedKFold
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.metrics import (
-    confusion_matrix,
-    roc_auc_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    accuracy_score,
-)
-
-from xgboost import XGBClassifier
-from imblearn.over_sampling import SMOTE
-
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-
-warnings.filterwarnings("ignore")
-
-
-# ============================================================
-# CONFIGURAÇÕES DO MODELO
-# ============================================================
-
-N_FOLDS = 5
-RANDOM_STATE = 42
-THRESHOLD_XGBOOST = 0.46702912081635545
-
-PARAMS_XGBOOST = {
-    "n_estimators": 187,
-    "max_depth": 3,
-    "learning_rate": 0.09680018169570574,
-    "subsample": 0.8840212380369016,
-    "colsample_bytree": 0.6400628095628191,
-    "min_child_weight": 2,
-    "gamma": 0.9946938715788189,
-    "reg_alpha": 0.042879353158190935,
-    "reg_lambda": 0.6815358078376077,
-    "random_state": RANDOM_STATE,
-    "verbosity": 0,
-    "eval_metric": "logloss",
-    "use_label_encoder": False,
-}
-
 
 # ============================================================
 # TABELA DE CUSTOS MÉDIOS
@@ -131,23 +84,17 @@ TABELA_CUSTOS_MEDIA = {
 def limpar_moeda_br(valor):
     if pd.isna(valor):
         return np.nan
-
     if isinstance(valor, (int, float)):
         return float(valor)
-
     v = str(valor).replace("R$", "").replace(" ", "").strip()
-
     if v == "" or v == "-":
         return np.nan
-
     if "," in v:
         v = v.replace(".", "").replace(",", ".")
-
     try:
         return float(v)
     except Exception:
         return np.nan
-
 
 def normalizar_nome_coluna(texto):
     texto = str(texto).strip().upper()
@@ -159,18 +106,13 @@ def normalizar_nome_coluna(texto):
     texto = texto.replace(")", "")
     return texto
 
-
 def padronizar_categorica(valor):
     if pd.isna(valor):
         return "OUTROS"
-
     valor = str(valor).strip()
-
     if valor == "":
         return "OUTROS"
-
     return valor
-
 
 def limpar_prazo(valor):
     """
@@ -179,885 +121,68 @@ def limpar_prazo(valor):
     """
     if pd.isna(valor):
         return np.nan
-
     if isinstance(valor, (int, float)):
         if float(valor) <= 0:
             return np.nan
         return int(math.ceil(float(valor)))
-
     v = str(valor).strip().lower()
-
     if v in ["", " ", "-", "não definido", "nao definido", "contrato por demanda", "nan", "none"]:
         return np.nan
-
     if "ano" in v:
         return np.nan
-
     numeros = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", v)]
-
     if not numeros:
         return np.nan
-
     numero = max(numeros)
-
     if "mes" in v or "mês" in v:
         if numero == 12:
             return np.nan
         return int(math.ceil(numero * 30))
-
     return int(math.ceil(numero))
-
 
 def criar_mapa_prazos(ensaios):
     mapa = {}
-
     for e in ensaios:
         sigla = str(e.get("Sigla", "")).strip()
         qtd = float(e.get("Quantidade", 0))
         prazo = e.get("Prazo")
         mapa[(sigla, qtd)] = prazo
-
     return mapa
-
-
-def remover_outliers_iqr(dados_series):
-    q1 = dados_series.quantile(0.25)
-    q3 = dados_series.quantile(0.75)
-    iqr = q3 - q1
-
-    return dados_series[
-        (dados_series >= q1 - 1.5 * iqr) &
-        (dados_series <= q3 + 1.5 * iqr)
-    ]
-
-
-def calcular_referencia_limpa(serie):
-    """
-    Calcula a referência de preço como a média da faixa de preços que mais se repete.
-    1. Remove nulos.
-    2. Remove outliers por IQR quando há amostra suficiente.
-    3. Para cada preço base, procura valores dentro de ±10%.
-    4. Escolhe a faixa com maior contagem; em empate, menor variância.
-    5. Retorna a média da faixa escolhida.
-    """
-    serie = serie.dropna().astype(float)
-
-    if len(serie) == 0:
-        return np.nan
-
-    if len(serie) > 5:
-        serie_limpa = remover_outliers_iqr(serie)
-        if len(serie_limpa) > 0:
-            serie = serie_limpa
-
-    if len(serie) == 0:
-        return np.nan
-
-    tolerancia = 0.10
-    melhor_contagem = 0
-    melhor_media = 0
-    menor_variancia = float("inf")
-
-    for valor_base in serie:
-        limite_inferior = valor_base * (1 - tolerancia)
-        limite_superior = valor_base * (1 + tolerancia)
-
-        valores_na_faixa = serie[
-            (serie >= limite_inferior) &
-            (serie <= limite_superior)
-        ]
-
-        contagem = len(valores_na_faixa)
-
-        if contagem > melhor_contagem:
-            melhor_contagem = contagem
-            melhor_media = valores_na_faixa.mean()
-            menor_variancia = valores_na_faixa.std() if contagem > 1 else 0
-
-        elif contagem == melhor_contagem:
-            variancia_atual = valores_na_faixa.std() if contagem > 1 else 0
-
-            if variancia_atual < menor_variancia:
-                melhor_media = valores_na_faixa.mean()
-                menor_variancia = variancia_atual
-
-    return float(max(melhor_media, 0.01))
-
-
-def calcular_moda_limpa(serie_precos):
-    """
-    Replica a lógica do Colab para a BASE DE DADOS MODELO:
-    - remove outliers por IQR quando há mais de 5 observações;
-    - usa a moda da série limpa;
-    - se não houver moda válida, usa a média.
-    """
-    serie_precos = serie_precos.dropna().astype(float)
-
-    if len(serie_precos) == 0:
-        return np.nan
-
-    if len(serie_precos) > 5:
-        precos_limpos = remover_outliers_iqr(serie_precos)
-        valores_para_calc = precos_limpos if not precos_limpos.empty else serie_precos
-    else:
-        valores_para_calc = serie_precos
-
-    try:
-        moda = valores_para_calc.mode()
-        if not moda.empty:
-            return float(moda.iloc[0])
-        return float(valores_para_calc.mean())
-    except Exception:
-        return np.nan
-
-
-def encontrar_coluna(df, alternativas):
-    mapa = {str(c).strip().lower(): c for c in df.columns}
-
-    for alt in alternativas:
-        chave = str(alt).strip().lower()
-        if chave in mapa:
-            return mapa[chave]
-
-    return None
-
-
-def criar_onehot_encoder():
-    try:
-        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        return OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-
-def criar_modelo_xgboost():
-    return XGBClassifier(**PARAMS_XGBOOST)
-
-
-def aplicar_smote_seguro(X_treino, y_treino):
-    """
-    SMOTE no mesmo padrão do Colab: k_neighbors baseado na quantidade
-    de positivos do treino. Mantém proteção para bases pequenas.
-    """
-    if len(y_treino.value_counts()) < 2:
-        return X_treino, y_treino
-
-    positivos_treino = int(y_treino.sum())
-
-    if positivos_treino <= 1:
-        return X_treino, y_treino
-
-    k_neighbors_ajustado = max(1, min(3, positivos_treino - 1))
-
-    smote = SMOTE(
-        random_state=RANDOM_STATE,
-        k_neighbors=k_neighbors_ajustado,
-    )
-
-    return smote.fit_resample(X_treino, y_treino)
-
-
-def montar_features_transformadas(preprocessor, X_fit, X_transform, colunas_cat, colunas_num):
-    preprocessor_fit = preprocessor.fit(X_fit)
-    Xt = preprocessor_fit.transform(X_transform)
-
-    try:
-        nomes_cat = (
-            preprocessor_fit
-            .named_transformers_["cat"]
-            .get_feature_names_out(colunas_cat)
-            .tolist()
-        )
-    except Exception:
-        nomes_cat = []
-
-    nomes_features = nomes_cat + colunas_num
-
-    Xt = pd.DataFrame(
-        Xt,
-        columns=nomes_features,
-        index=X_transform.index,
-    )
-
-    for c in Xt.columns:
-        Xt[c] = pd.to_numeric(Xt[c], errors="coerce").fillna(0)
-
-    return Xt, nomes_features, preprocessor_fit
-
 
 def transformar_com_preprocessador(preprocessor_fit, X_transform, nomes_features):
     Xt = preprocessor_fit.transform(X_transform)
-
     Xt = pd.DataFrame(
         Xt,
         columns=nomes_features,
         index=X_transform.index,
     )
-
     for c in Xt.columns:
         Xt[c] = pd.to_numeric(Xt[c], errors="coerce").fillna(0)
-
     return Xt.reindex(columns=nomes_features, fill_value=0)
 
 
-def calcular_metricas_modelo(y_real, y_prob, threshold):
-    y_pred = (y_prob >= threshold).astype(int)
-    matriz = confusion_matrix(y_real, y_pred, labels=[0, 1])
-
-    return {
-        "threshold": threshold,
-        "accuracy": accuracy_score(y_real, y_pred),
-        "precision": precision_score(y_real, y_pred, zero_division=0),
-        "recall": recall_score(y_real, y_pred, zero_division=0),
-        "f1": f1_score(y_real, y_pred, zero_division=0),
-        "roc_auc": roc_auc_score(y_real, y_prob) if len(np.unique(y_real)) > 1 else np.nan,
-        "tn": matriz[0][0],
-        "fp": matriz[0][1],
-        "fn": matriz[1][0],
-        "tp": matriz[1][1],
-    }
-
-
-# =========================================================================
-# FUNÇÕES DE DRIVE
-# =========================================================================
-
-def criar_servico_drive():
-    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
-
-    creds = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]),
-        scopes=scopes,
-    )
-
-    return build("drive", "v3", credentials=creds)
-
-
-def buscar_arquivo_na_pasta(service, folder_id: str, file_name: str):
-    query = (
-        f"'{folder_id}' in parents "
-        f"and name = '{file_name}' "
-        f"and trashed = false"
-    )
-
-    response = service.files().list(
-        q=query,
-        fields="files(id, name, mimeType)",
-        pageSize=10,
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-
-    files = response.get("files", [])
-
-    if not files:
-        raise FileNotFoundError(
-            f"Arquivo '{file_name}' não encontrado na pasta '{folder_id}'."
-        )
-
-    return files[0]
-
-
-def baixar_arquivo_drive_em_memoria(service, file_id: str) -> io.BytesIO:
-    request = service.files().get_media(
-        fileId=file_id,
-        supportsAllDrives=True,
-    )
-
-    buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-
-    done = False
-
-    while not done:
-        _, done = downloader.next_chunk()
-
-    buffer.seek(0)
-    return buffer
-
-
 # ============================================================
-# GERAÇÃO DA BASE DO MODELO A PARTIR DA BASE ENSAIOS
+# FUNÇÃO PRINCIPAL CACHEADA - CARREGAMENTO DO MODELO LOCAL
 # ============================================================
 
-def gerar_base_modelo(df_ensaios: pd.DataFrame):
-    """
-    Gera a BASE DE DADOS MODELO replicando a construção do Colab.
-
-    Pontos importantes para manter compatibilidade:
-    - mês vem de "Mês Recebimento";
-    - prazo vem de "Prazo de Execução";
-    - prazos inválidos são preenchidos pela média por sigla e depois pela média geral sem CAMPO;
-    - preço_referencia do modelo usa calcular_moda_limpa;
-    - setor/mineral são mantidos como string, como no notebook.
-    """
-    col_contrato = encontrar_coluna(df_ensaios, ["Négocio", "Negócio", "Negocio"])
-    col_cliente = encontrar_coluna(df_ensaios, ["Cliente"])
-    col_sigla = encontrar_coluna(df_ensaios, ["Sigla"])
-    col_qtd = encontrar_coluna(df_ensaios, ["Quantidade", "Qtd"])
-    col_valor_unit = encontrar_coluna(df_ensaios, ["Valor Unitario", "Valor Unitário", "Valor_Unitario"])
-    col_status = encontrar_coluna(df_ensaios, ["Status"])
-    col_mes = encontrar_coluna(
-        df_ensaios,
-        [
-            "Mês Recebimento",
-            "Mes Recebimento",
-            "Mês Ganho/Perdido",
-            "Mes Ganho/Perdido",
-            "Mês",
-            "Mes",
-        ],
-    )
-    col_prazo = encontrar_coluna(
-        df_ensaios,
-        [
-            "Prazo de Execução",
-            "Prazo de Execucao",
-            "Prazo Execução",
-            "Prazo Execucao",
-            "Prazo",
-            "Prazo Entrega",
-            "Prazo de Entrega",
-        ],
-    )
-    col_mineral = encontrar_coluna(df_ensaios, ["Mineral"])
-    col_setor = encontrar_coluna(df_ensaios, ["Setor"])
-
-    colunas_obrigatorias = {
-        "contrato": col_contrato,
-        "cliente": col_cliente,
-        "sigla": col_sigla,
-        "quantidade": col_qtd,
-        "valor_unitario": col_valor_unit,
-        "status": col_status,
-        "mes": col_mes,
-    }
-
-    faltantes = [nome for nome, col in colunas_obrigatorias.items() if col is None]
-
-    if faltantes:
-        raise ValueError(
-            "Colunas obrigatórias não encontradas na BASE ENSAIOS: "
-            + ", ".join(faltantes)
-        )
-
-    df = df_ensaios.copy()
-
-    if col_setor is None:
-        df["_setor_modelo"] = "OUTROS"
-        col_setor = "_setor_modelo"
-
-    if col_mineral is None:
-        df["_mineral_modelo"] = "OUTROS"
-        col_mineral = "_mineral_modelo"
-
-    if col_prazo is None:
-        df["_prazo_modelo"] = np.nan
-        col_prazo = "_prazo_modelo"
-
-    df[col_valor_unit] = df[col_valor_unit].apply(limpar_moeda_br)
-    df[col_qtd] = pd.to_numeric(df[col_qtd], errors="coerce")
-
-    df[col_sigla] = df[col_sigla].astype(str).str.strip()
-    df[col_cliente] = df[col_cliente].astype(str).str.strip()
-    df[col_mes] = df[col_mes].astype(str).str.strip()
-    df[col_mineral] = df[col_mineral].astype(str).str.strip()
-    df[col_setor] = df[col_setor].astype(str).str.strip()
-
-    # Limpeza e preenchimento de prazo igual ao Colab
-    df[col_prazo] = df[col_prazo].apply(limpar_prazo)
-
-    media_prazo_por_sigla = (
-        df.groupby(col_sigla)[col_prazo]
-        .transform(lambda x: math.ceil(x.mean()) if x.notna().any() else np.nan)
-    )
-    df[col_prazo] = df[col_prazo].fillna(media_prazo_por_sigla)
-
-    media_base = df.loc[df[col_sigla] != "CAMPO", col_prazo]
-    media_prazo_geral = math.ceil(media_base.mean()) if media_base.notna().any() else 0
-    df[col_prazo] = df[col_prazo].fillna(media_prazo_geral)
-
-    df[col_prazo] = df[col_prazo].apply(
-        lambda x: math.ceil(x) if pd.notna(x) else 0
-    ).astype(int)
-
-    df = df.dropna(
-        subset=[
-            col_contrato,
-            col_cliente,
-            col_sigla,
-            col_qtd,
-            col_valor_unit,
-            col_status,
-            col_mes,
-        ]
-    ).copy()
-
-    df = df[df[col_valor_unit] > 0].copy()
-
-    df["target"] = (
-        df[col_status]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .map(lambda x: 1 if x == "GANHO" else 0)
-    )
-
-    df["valor_total_item"] = df[col_qtd] * df[col_valor_unit]
-
-    # No Colab, a base de treino usa moda limpa como preço de referência
-    df_ref_modelo = (
-        df.groupby(col_sigla)[col_valor_unit]
-        .apply(calcular_moda_limpa)
-        .reset_index()
-        .rename(columns={col_valor_unit: "preco_referencia"})
-    )
-
-    tabela_ref_modelo = dict(zip(df_ref_modelo[col_sigla], df_ref_modelo["preco_referencia"]))
-
-    df["preco_referencia"] = df[col_sigla].map(tabela_ref_modelo)
-    df["preco_relativo"] = df[col_valor_unit] / df["preco_referencia"]
-    df["preco_relativo"] = (
-        df["preco_relativo"]
-        .clip(lower=0.1, upper=5.0)
-        .fillna(1.0)
-    )
-
-    siglas = sorted(df[col_sigla].dropna().unique().tolist())
-
-    linhas_modelo = []
-
-    for id_contrato, grupo in df.groupby(col_contrato):
-        grupo = grupo.copy()
-
-        cliente = grupo[col_cliente].iloc[0]
-        mes = grupo[col_mes].iloc[0]
-
-        valor_total_contrato = grupo["valor_total_item"].sum()
-        qtd_total = grupo[col_qtd].sum()
-        n_siglas = grupo[col_sigla].nunique()
-
-        preco_relativo_medio = grupo["preco_relativo"].mean()
-        preco_relativo_mediano = grupo["preco_relativo"].median()
-        preco_relativo_min = grupo["preco_relativo"].min()
-        preco_relativo_max = grupo["preco_relativo"].max()
-        preco_relativo_std = grupo["preco_relativo"].std(ddof=0) if len(grupo) > 1 else 0.0
-        amplitude_preco_relativo = preco_relativo_max - preco_relativo_min
-
-        target = grupo["target"].max()
-
-        idx_maior = grupo["valor_total_item"].idxmax()
-        valor_maior_item = grupo.loc[idx_maior, "valor_total_item"]
-        maior_item = grupo.loc[idx_maior, col_sigla]
-        participacao_maior_item = (
-            valor_maior_item / valor_total_contrato if valor_total_contrato > 0 else 0
-        )
-
-        prazo_medio = int(math.ceil(grupo[col_prazo].mean()))
-        prazo_max = int(math.ceil(grupo[col_prazo].max()))
-        prazo_min = int(math.ceil(grupo[col_prazo].min()))
-
-        mineral = grupo[col_mineral].iloc[0]
-        setor = grupo[col_setor].iloc[0]
-
-        linha = {
-            "id_contrato": id_contrato,
-            "cliente": cliente,
-            "mes": mes,
-            "valor_total_contrato": valor_total_contrato,
-            "qtd_total": qtd_total,
-            "n_siglas": n_siglas,
-            "preco_relativo_medio": preco_relativo_medio,
-            "preco_relativo_mediano": preco_relativo_mediano,
-            "preco_relativo_min": preco_relativo_min,
-            "preco_relativo_max": preco_relativo_max,
-            "preco_relativo_std": preco_relativo_std,
-            "amplitude_preco_relativo": amplitude_preco_relativo,
-            "target": target,
-            "participacao_maior_item": participacao_maior_item,
-            "maior_item": maior_item,
-            "prazo_medio": prazo_medio,
-            "prazo_max": prazo_max,
-            "prazo_min": prazo_min,
-            "mineral": mineral,
-            "setor": setor,
-        }
-
-        valor_total_por_sigla = (
-            grupo.groupby(col_sigla)["valor_total_item"]
-            .sum()
-            .to_dict()
-        )
-
-        preco_rel_sigla = {}
-
-        for sigla in siglas:
-            grupo_sigla = grupo[grupo[col_sigla] == sigla]
-
-            if len(grupo_sigla) == 0:
-                preco_rel_sigla[sigla] = 0.0
-            else:
-                pesos = grupo_sigla["valor_total_item"].values
-                valores = grupo_sigla["preco_relativo"].values
-
-                if pesos.sum() > 0:
-                    preco_rel_sigla[sigla] = np.average(valores, weights=pesos)
-                else:
-                    preco_rel_sigla[sigla] = grupo_sigla["preco_relativo"].mean()
-
-        for sigla in siglas:
-            nome_sigla = normalizar_nome_coluna(sigla)
-            valor_sigla = valor_total_por_sigla.get(sigla, 0.0)
-
-            linha[f"preco_relativo_{nome_sigla}"] = preco_rel_sigla.get(sigla, 0.0)
-            linha[f"part_valor_{nome_sigla}"] = (
-                valor_sigla / valor_total_contrato if valor_total_contrato > 0 else 0.0
-            )
-
-        linhas_modelo.append(linha)
-
-    df_modelo = pd.DataFrame(linhas_modelo)
-
-    colunas_globais = [
-        "id_contrato",
-        "cliente",
-        "mineral",
-        "setor",
-        "mes",
-        "prazo_medio",
-        "prazo_max",
-        "prazo_min",
-        "valor_total_contrato",
-        "qtd_total",
-        "n_siglas",
-        "preco_relativo_medio",
-        "preco_relativo_mediano",
-        "preco_relativo_min",
-        "preco_relativo_max",
-        "preco_relativo_std",
-        "amplitude_preco_relativo",
-        "target",
-        "participacao_maior_item",
-        "maior_item",
-    ]
-
-    outras_colunas = [c for c in df_modelo.columns if c not in colunas_globais]
-    df_modelo = df_modelo[colunas_globais + sorted(outras_colunas)]
-
-    return df, df_ref_modelo, df_modelo, tabela_ref_modelo, siglas
-
-
-def calcular_tabela_precos_global(df_ensaios: pd.DataFrame):
-    """
-    Replica a tabela de preços usada pela heurística no Colab:
-    lê BASE ENSAIOS, limpa Valor Unitario, filtra valores positivos e calcula
-    calcular_referencia_limpa por Sigla.
-    """
-    col_sigla = encontrar_coluna(df_ensaios, ["Sigla"])
-    col_valor_unit = encontrar_coluna(df_ensaios, ["Valor Unitario", "Valor Unitário", "Valor_Unitario"])
-
-    if col_sigla is None or col_valor_unit is None:
-        raise ValueError("Não foi possível calcular tabela de preços: colunas Sigla/Valor Unitario ausentes.")
-
-    df_precos = df_ensaios.copy()
-    df_precos[col_valor_unit] = df_precos[col_valor_unit].apply(limpar_moeda_br)
-    df_precos[col_sigla] = df_precos[col_sigla].astype(str).str.strip()
-
-    df_ref = (
-        df_precos[df_precos[col_valor_unit] > 0]
-        .groupby(col_sigla)[col_valor_unit]
-        .apply(calcular_referencia_limpa)
-        .reset_index()
-    )
-
-    tabela_precos = dict(zip(df_ref[col_sigla], df_ref[col_valor_unit]))
-
-    siglas_preco = sorted(
-        df_precos[col_sigla]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique()
-        .tolist()
-    )
-
-    return df_ref, tabela_precos, siglas_preco
-
-
-# ============================================================
-# PREPARAÇÃO E TREINO DO MODELO
-# ============================================================
-
-def preparar_dataset_ml(df_modelo: pd.DataFrame):
-    df_modelo = df_modelo.dropna(subset=["target"]).copy()
-
-    y = df_modelo["target"].astype(int)
-
-    X_raw = df_modelo.drop(
-        columns=["target", "id_contrato"],
-        errors="ignore",
-    ).copy()
-
-    threshold_nulos = 0.5
-
-    colunas_removidas_por_nulos = [
-        c for c in X_raw.columns
-        if X_raw[c].isnull().mean() >= threshold_nulos and c != "mineral"
-    ]
-
-    X_raw = X_raw.drop(columns=colunas_removidas_por_nulos)
-
-    # Ordem igual ao Colab
-    colunas_categoricas_base = [
-        "mes",
-        "setor",
-        "mineral",
-        "cliente",
-        "maior_item",
-    ]
-
-    colunas_categoricas = [
-        c for c in colunas_categoricas_base
-        if c in X_raw.columns
-    ]
-
-    colunas_numericas = [
-        c for c in X_raw.columns
-        if c not in colunas_categoricas
-    ]
-
-    for col in colunas_categoricas:
-        X_raw[col] = X_raw[col].apply(padronizar_categorica)
-
-    for col in colunas_numericas:
-        X_raw[col] = pd.to_numeric(X_raw[col], errors="coerce")
-
-    X_raw[colunas_numericas] = X_raw[colunas_numericas].fillna(0)
-
-    preprocessador = ColumnTransformer(
-        transformers=[
-            (
-                "cat",
-                criar_onehot_encoder(),
-                colunas_categoricas,
-            ),
-            (
-                "num",
-                "passthrough",
-                colunas_numericas,
-            ),
-        ],
-        remainder="drop",
-    )
-
-    X_enc, nomes_features, preprocessador_final = montar_features_transformadas(
-        preprocessador,
-        X_raw,
-        X_raw,
-        colunas_categoricas,
-        colunas_numericas,
-    )
-
-    return {
-        "X_raw": X_raw,
-        "X_enc": X_enc,
-        "y": y,
-        "preprocessador_final": preprocessador_final,
-        "nomes_features": nomes_features,
-        "colunas_categoricas": colunas_categoricas,
-        "colunas_numericas": colunas_numericas,
-        "colunas_removidas_por_nulos": colunas_removidas_por_nulos,
-    }
-
-
-def validar_xgboost_5_folds(X_enc, y):
-    contagem_classes = y.value_counts()
-
-    if len(contagem_classes) < 2 or contagem_classes.min() < N_FOLDS:
-        return {
-            "metricas_globais": {},
-            "df_resultados_folds": pd.DataFrame(),
-            "df_importancias": pd.DataFrame(columns=["feature", "valor"]),
-            "y_real_total": np.array([]),
-            "y_prob_total": np.array([]),
-        }
-
-    cv = StratifiedKFold(
-        n_splits=N_FOLDS,
-        shuffle=True,
-        random_state=RANDOM_STATE,
-    )
-
-    y_real_total = []
-    y_prob_total = []
-    resultados_folds = []
-    importancias_folds = []
-
-    for fold, (train_idx, val_idx) in enumerate(cv.split(X_enc, y), start=1):
-        X_train = X_enc.iloc[train_idx].copy()
-        X_val = X_enc.iloc[val_idx].copy()
-
-        y_train = y.iloc[train_idx].copy()
-        y_val = y.iloc[val_idx].copy()
-
-        X_train_bal, y_train_bal = aplicar_smote_seguro(X_train, y_train)
-
-        modelo_fold = criar_modelo_xgboost()
-        modelo_fold.fit(X_train_bal, y_train_bal)
-
-        y_prob = modelo_fold.predict_proba(X_val)[:, 1]
-
-        y_real_total.extend(y_val.tolist())
-        y_prob_total.extend(y_prob.tolist())
-
-        auc_fold = roc_auc_score(y_val, y_prob) if len(np.unique(y_val)) > 1 else np.nan
-
-        y_pred_fold = (y_prob >= THRESHOLD_XGBOOST).astype(int)
-        matriz_fold = confusion_matrix(y_val, y_pred_fold, labels=[0, 1])
-
-        resultados_folds.append({
-            "fold": fold,
-            "roc_auc": auc_fold,
-            "accuracy": accuracy_score(y_val, y_pred_fold),
-            "precision": precision_score(y_val, y_pred_fold, zero_division=0),
-            "recall": recall_score(y_val, y_pred_fold, zero_division=0),
-            "f1": f1_score(y_val, y_pred_fold, zero_division=0),
-            "tn": matriz_fold[0][0],
-            "fp": matriz_fold[0][1],
-            "fn": matriz_fold[1][0],
-            "tp": matriz_fold[1][1],
-        })
-
-        importancias_folds.append(
-            pd.DataFrame({
-                "feature": X_enc.columns,
-                "valor": modelo_fold.feature_importances_,
-            })
-        )
-
-    y_real_total = np.array(y_real_total)
-    y_prob_total = np.array(y_prob_total)
-
-    metricas_globais = calcular_metricas_modelo(
-        y_real_total,
-        y_prob_total,
-        THRESHOLD_XGBOOST,
-    )
-
-    df_resultados_folds = pd.DataFrame(resultados_folds)
-
-    if len(importancias_folds) > 0:
-        df_importancias = (
-            pd.concat(importancias_folds, ignore_index=True)
-            .groupby("feature", as_index=False)["valor"]
-            .mean()
-            .sort_values("valor", ascending=False)
-        )
-    else:
-        df_importancias = pd.DataFrame(columns=["feature", "valor"])
-
-    return {
-        "metricas_globais": metricas_globais,
-        "df_resultados_folds": df_resultados_folds,
-        "df_importancias": df_importancias,
-        "y_real_total": y_real_total,
-        "y_prob_total": y_prob_total,
-    }
-
-
-def treinar_xgboost_final(X_enc, y):
-    X_bal, y_bal = aplicar_smote_seguro(X_enc, y)
-
-    modelo_final = criar_modelo_xgboost()
-    modelo_final.fit(X_bal, y_bal)
-
-    return modelo_final
-
-
-# ============================================================
-# FUNÇÃO PRINCIPAL CACHEADA
-# ============================================================
-
-@st.cache_resource(show_spinner="Carregando base e treinando modelo XGBoost...")
+@st.cache_resource(show_spinner="Carregando o modelo pré-treinado...")
 def inicializar_modelo_e_dados():
-    service = criar_servico_drive()
-
-    folder_id = st.secrets["app_config"]["id_pasta_drive"]
-    nome_arquivo = st.secrets["app_config"]["nome_arq_xls"]
-    aba_ensaios = st.secrets["app_config"]["nome_aba_ensaios"]
-
-    arquivo = buscar_arquivo_na_pasta(service, folder_id, nome_arquivo)
-    conteudo_excel = baixar_arquivo_drive_em_memoria(service, arquivo["id"])
-
-    df_ensaios = pd.read_excel(
-        conteudo_excel,
-        sheet_name=aba_ensaios,
-    )
-
-    df_ensaios_tratado, df_ref_modelo, df_modelo, tabela_ref_modelo, siglas_modelo = gerar_base_modelo(
-        df_ensaios
-    )
-
-    # Tabela de preços da heurística separada, como no Colab.
-    df_ref_precos, tabela_precos_global, siglas_precos = calcular_tabela_precos_global(df_ensaios)
-
-    # Para montar as colunas por sigla do modelo, usamos as siglas da base modelo.
-    # Para a UI/lista, usamos as siglas disponíveis na tabela histórica.
-    siglas = siglas_modelo
-
-    dados_preparo = preparar_dataset_ml(df_modelo)
-
-    X_enc = dados_preparo["X_enc"]
-    y = dados_preparo["y"]
-
-    resultado_cv = validar_xgboost_5_folds(X_enc, y)
-    modelo_xgboost_final = treinar_xgboost_final(X_enc, y)
-
-    lista_clientes_bd = sorted(
-        [
-            str(c).strip()
-            for c in df_modelo["cliente"].dropna().unique()
-            if str(c).strip() != ""
-        ]
-    )
-
-    lista_setores_bd = sorted(
-        [
-            str(c).strip()
-            for c in df_modelo["setor"].dropna().unique()
-            if str(c).strip() != ""
-        ]
-    )
-
-    lista_minerais_bd = sorted(
-        [
-            str(c).strip()
-            for c in df_modelo["mineral"].dropna().unique()
-            if str(c).strip() != ""
-        ]
-    )
+    # Carrega o modelo treinado e salvo pelo script offline
+    with open("artefatos_modelo.ppkl", "rb") as f:
+        dados_ml = pickle.load(f)
 
     return {
-        "modelo_heuristica": modelo_xgboost_final,
-        "threshold_heuristica": THRESHOLD_XGBOOST,
-        "tabela_precos_global": tabela_precos_global,
-        "siglas": siglas,
-        "siglas_precos": siglas_precos,
-        "lista_clientes_bd": lista_clientes_bd,
-        "lista_setores_bd": lista_setores_bd,
-        "lista_minerais_bd": lista_minerais_bd,
-        "df_modelo": df_modelo,
-        "df_ref": df_ref_precos,
-        "df_ref_modelo": df_ref_modelo,
-        "df_ensaios_tratado": df_ensaios_tratado,
-        "preprocessador_output_final": dados_preparo["preprocessador_final"],
-        "features_output_final": dados_preparo["nomes_features"],
-        "colunas_categoricas_output_final": dados_preparo["colunas_categoricas"],
-        "colunas_numericas_output_final": dados_preparo["colunas_numericas"],
-        "colunas_removidas_por_nulos_output_final": dados_preparo["colunas_removidas_por_nulos"],
-        "df_resultados_folds": resultado_cv["df_resultados_folds"],
-        "metricas_cv_global": resultado_cv["metricas_globais"],
-        "df_importancias_xgb": resultado_cv["df_importancias"],
-        "arquivo_drive_usado": arquivo["name"],
+        "modelo_heuristica": dados_ml["modelo_heuristica"],
+        "threshold_heuristica": dados_ml["threshold_heuristica"],
+        "tabela_precos_global": dados_ml["tabela_precos_global"],
+        "siglas": dados_ml["siglas"],
+        "lista_clientes_bd": dados_ml["lista_clientes_bd"],
+        "lista_setores_bd": dados_ml["lista_setores_bd"],
+        "lista_minerais_bd": dados_ml["lista_minerais_bd"],
+        "preprocessador_output_final": dados_ml["preprocessador_output_final"],
+        "features_output_final": dados_ml["features_output_final"],
+        "colunas_categoricas_output_final": dados_ml["colunas_categoricas_output_final"],
+        "colunas_numericas_output_final": dados_ml["colunas_numericas_output_final"],
     }
 
 
@@ -1621,7 +746,6 @@ def analisar_cenario_manual(
 def on_change_preco():
     st.session_state.resultado_precos = None
 
-
 def adicionar_ensaio():
     st.session_state.ensaios_sim_preco.append({
         "id": str(uuid.uuid4()),
@@ -1631,11 +755,9 @@ def adicionar_ensaio():
     })
     on_change_preco()
 
-
 def remover_ensaio(idx):
     st.session_state.ensaios_sim_preco.pop(idx)
     on_change_preco()
-
 
 def limpar_simulacao():
     st.session_state.ensaios_sim_preco = [{
@@ -1682,7 +804,7 @@ def render():
         )
 
     except Exception as e:
-        st.error(f"Erro ao carregar dados/modelo. Verifique a planilha: {e}")
+        st.error(f"Erro ao carregar o arquivo do modelo (artefatos_modelo.ppkl): {e}")
         return
 
     if "ensaios_sim_preco" not in st.session_state:
@@ -1940,7 +1062,7 @@ def render():
         if res_otimizado:
             st.markdown("##### Análise dos Cenários Sugeridos:")
             if res_otimizado["atingiu_margem_minima"]:
-                if res_margem_min and res_otimizado["margem_percentual"] > res_margem_min["margem_percentual"] + 0.0001: # Adiciona pequena tolerância para float
+                if res_margem_min and res_otimizado["margem_percentual"] > res_margem_min["margem_percentual"] + 0.0001:
                     st.info(
                         "**Cenário Otimizado (Max Probabilidade & Margem):** Este cenário não apenas maximizou a probabilidade de ganho, "
                         "mas também superou a margem mínima desejada e, inclusive, obteve uma margem percentual maior que o cenário "
@@ -2043,19 +1165,14 @@ def render():
 
             if "Ensaio" not in df_resultados.columns:
                 df_resultados["Ensaio"] = "-"
-
             if "Qtd" not in df_resultados.columns:
                 df_resultados["Qtd"] = 0
-
             if "Prazo" not in df_resultados.columns:
                 df_resultados["Prazo"] = "-"
-
             if "Preço Otimizado (R$)" not in df_resultados.columns:
                 df_resultados["Preço Otimizado (R$)"] = 0.0
-
             if "Custo Unitário (R$)" not in df_resultados.columns:
                 df_resultados["Custo Unitário (R$)"] = 0.0
-
             if "Valor Total (R$)" not in df_resultados.columns:
                 df_resultados["Valor Total (R$)"] = (
                     pd.to_numeric(df_resultados["Qtd"], errors="coerce").fillna(0)
