@@ -345,6 +345,55 @@ def selecionar_colunas_por_cabecalho(df, mapeamento, nome_aba):
         )
     return df[list(selecionadas)].rename(columns=selecionadas).copy()
 
+
+def ler_aba_com_cabecalho_detectado(
+    caminho_arquivo,
+    nome_aba,
+    mapeamento,
+    max_linhas_busca=30,
+    minimo_acertos=3,
+):
+    """
+    Localiza a linha real do cabeçalho quando a planilha possui títulos,
+    observações ou células mescladas antes da tabela.
+    """
+    previa = pd.read_excel(
+        caminho_arquivo,
+        sheet_name=nome_aba,
+        header=None,
+        nrows=max_linhas_busca,
+    )
+
+    melhor_linha = None
+    maior_pontuacao = 0
+
+    for indice, linha in previa.iterrows():
+        valores = {
+            normalizar_nome(valor)
+            for valor in linha.tolist()
+            if not pd.isna(valor) and normalizar_nome(valor)
+        }
+        pontuacao = sum(
+            any(normalizar_nome(candidato) in valores for candidato in candidatos)
+            for candidatos in mapeamento.values()
+        )
+        if pontuacao > maior_pontuacao:
+            melhor_linha = int(indice)
+            maior_pontuacao = pontuacao
+
+    limite = min(minimo_acertos, len(mapeamento))
+    if melhor_linha is not None and maior_pontuacao >= limite:
+        return pd.read_excel(
+            caminho_arquivo,
+            sheet_name=nome_aba,
+            header=melhor_linha,
+        )
+
+    # Mantém o comportamento anterior para que a validação existente mostre
+    # os cabeçalhos encontrados caso nenhuma linha plausível seja localizada.
+    return pd.read_excel(caminho_arquivo, sheet_name=nome_aba)
+
+
 def classificar_turno(valor):
     txt = str(valor).strip().lower()
     if txt in {"a", "b", "adm", "nan", ""}:
@@ -420,9 +469,13 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
         pd.read_excel(arq_alocacao, sheet_name="Localidade"),
         {
             "projeto": ["Projeto"],
-            "cidade_projeto": ["Local"],
-            "inicio_projeto": ["Inicio"],
-            "fim_projeto": ["Término"],
+            "cidade_projeto": [
+                "Cidade", "Local", "Localidade", "Cidade do projeto", "Cidade Projeto"
+            ],
+            "inicio_projeto": ["Início", "Data início", "Início projeto", "Início do projeto"],
+            "fim_projeto": [
+                "Fim", "Término", "Termino", "Data fim", "Fim projeto", "Fim do projeto"
+            ],
         },
         "Localidade",
     )
@@ -430,25 +483,34 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
     df_disp = selecionar_colunas_por_cabecalho(
         pd.read_excel(arq_alocacao, sheet_name="Disponibilidade"),
         {
-            "matricula": ["Matricula"],
-            "muda_turno": ["Disponível para outro turno? (Sim/Não)"],
+            "matricula": ["Matrícula", "Matricula"],
+            "muda_turno": [
+                "Disponível para outro turno? (Sim/Não)",
+                "Muda turno", "Muda de turno", "Mudança de turno",
+                "Flexibilidade de turno", "Aceita mudança de turno?",
+            ],
         },
         "Disponibilidade",
     )
 
+    mapeamento_controle_ferias = {
+        "matricula": ["Matricula", "Matrícula"],
+        "nome": ["Empregado", "Nome"],
+        "fim_aquisitivo": ["Fim aquisitivo"],
+        "dias_restantes": ["Dias restante", "Dias restantes"],
+        "limite_gozo": ["Limite p/ gozo", "Limite para gozo"],
+        "inicio_ferias_1": ["Início férias", "Inicio ferias"],
+        "fim_ferias_1": ["Fim Férias", "Fim Ferias"],
+        "inicio_ferias_2": ["Início férias 1", "Inicio ferias 1"],
+        "fim_ferias_2": ["Fim Férias 1", "Fim Ferias 1"],
+    }
     df_controle = selecionar_colunas_por_cabecalho(
-        pd.read_excel(arq_ferias, sheet_name="Controle de Férias"),
-        {
-            "matricula": ["Matricula", "Matrícula"],
-            "nome": ["Empregado", "Nome"],
-            "fim_aquisitivo": ["Fim aquisitivo"],
-            "dias_restantes": ["Dias restante", "Dias restantes"],
-            "limite_gozo": ["Limite p/ gozo", "Limite para gozo"],
-            "inicio_ferias_1": ["Início férias", "Inicio ferias"],
-            "fim_ferias_1": ["Fim Férias", "Fim Ferias"],
-            "inicio_ferias_2": ["Início férias 1", "Inicio ferias 1"],
-            "fim_ferias_2": ["Fim Férias 1", "Fim Ferias 1"],
-        },
+        ler_aba_com_cabecalho_detectado(
+            arq_ferias,
+            "Controle de Férias",
+            mapeamento_controle_ferias,
+        ),
+        mapeamento_controle_ferias,
         "Controle de Férias",
     )
     qtd_controle_lido = len(df_controle)
