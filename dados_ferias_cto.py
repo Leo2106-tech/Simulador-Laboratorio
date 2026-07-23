@@ -420,9 +420,13 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
         pd.read_excel(arq_alocacao, sheet_name="Localidade"),
         {
             "projeto": ["Projeto"],
-            "cidade_projeto": ["Cidade", "Localidade", "Cidade do projeto", "Cidade Projeto"],
+            "cidade_projeto": [
+                "Cidade", "Local", "Localidade", "Cidade do projeto", "Cidade Projeto"
+            ],
             "inicio_projeto": ["Início", "Data início", "Início projeto", "Início do projeto"],
-            "fim_projeto": ["Fim", "Data fim", "Fim projeto", "Fim do projeto"],
+            "fim_projeto": [
+                "Fim", "Término", "Termino", "Data fim", "Fim projeto", "Fim do projeto"
+            ],
         },
         "Localidade",
     )
