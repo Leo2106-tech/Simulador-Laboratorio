@@ -945,7 +945,13 @@ def render():
         tabela_precos_global = dados_ml["tabela_precos_global"]
         opcoes_siglas = dados_ml["siglas"]
         lista_clientes_bd = dados_ml["lista_clientes_bd"]
-        lista_setores_bd = dados_ml["lista_setores_bd"]
+        lista_setores_bd = [
+            setor
+            for setor in dados_ml["lista_setores_bd"]
+            if str(setor).strip()
+            and str(setor).strip().lower() != "nan"
+            and str(setor).strip().upper() != "#REF!"
+        ]
         lista_minerais_bd = dados_ml["lista_minerais_bd"]
 
         preprocessador_output_final = dados_ml["preprocessador_output_final"]
@@ -956,24 +962,6 @@ def render():
         # Atualiza sempre para evitar reaproveitar opções antigas do session_state
         # depois de trocar o arquivo artefatos_modelo.pkl.
         st.session_state.opcoes_siglas = sorted([s for s in opcoes_siglas if str(s) != "nan"])
-
-        with st.sidebar.expander("Debug do modelo", expanded=False):
-            st.write("Artefato:", dados_ml.get("caminho_artefato_modelo", "-"))
-
-            metadata = dados_ml.get("metadata")
-            if metadata:
-                st.write("Arquivo treino:", metadata.get("arquivo_drive_name", metadata.get("arquivo_excel", "-")))
-                st.write("ID arquivo:", metadata.get("arquivo_drive_id", "-"))
-                st.write("Shape X_enc:", metadata.get("shape_X_enc", "-"))
-                st.write("Qtd features:", metadata.get("qtd_features", "-"))
-                st.write("XGBoost:", metadata.get("xgboost", "-"))
-                st.write("scikit-learn:", metadata.get("sklearn", "-"))
-
-            sanity = dados_ml.get("sanity_check_streamlit")
-            if sanity:
-                st.write("Sanity prob treino:", sanity.get("prob_treino"))
-                st.write("Sanity prob atual:", sanity.get("prob_atual"))
-                st.write("Sanity diff:", sanity.get("diff"))
 
     except Exception as e:
         st.error(f"Erro ao carregar o arquivo do modelo (artefatos_modelo.pkl): {e}")

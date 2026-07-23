@@ -1,109 +1,191 @@
-# app.py
 import streamlit as st
 
-# Importe os módulos que você criou
 from style import aplicar_estilo_personalizado
 import sim_capacidade
+import sim_cto
 import sim_prazos
 import sim_precos
 
-# Configuração da página (sem alterações)
+
 st.set_page_config(
-    page_title="Simulador do Laboratório",
+    page_title="Simulador Laboratório Geral",
     layout="wide",
     page_icon="assets/CHMMS_icone-34.png",
     initial_sidebar_state="expanded",
-    menu_items={'About': "Simulador de cenários para o Laboratório Central."}
+    menu_items={
+        "About": (
+            "Simulador Laboratório Geral: ferramentas do Laboratório Central "
+            "e agendamento de férias do CTO."
+        )
+    },
 )
 
-# Aplica nosso estilo CSS
 aplicar_estilo_personalizado()
 
-# =========================================================================
-#             INICIALIZAÇÃO E CONTROLE DE ESTADO (A NOVA LÓGICA)
-# =========================================================================
 
-# 1. Inicializamos o 'session_state' para lembrar a escolha do usuário.
-#    Se 'tipo_simulacao' não existir na memória, ele é criado com o valor None.
-st.session_state.setdefault('tipo_simulacao', None)
-
-# 2. Funções de Callback para os botões.
-#    Essas funções alteram o estado da aplicação.
-def set_simulacao(tipo):
-    """Salva o tipo de simulação escolhido no estado da sessão."""
-    st.session_state.tipo_simulacao = tipo
-
-def go_home():
-    """Limpa o estado da sessão para voltar ao menu principal."""
-    st.session_state.tipo_simulacao = None
-
-# =========================================================================
-#                        INTERFACE (UI)
-# =========================================================================
-
-# --- Barra Lateral (Sidebar) ---
-# A sidebar agora é mais simples. O botão de voltar só aparece se já
-# estivermos dentro de uma simulação.
-with st.sidebar:
-    try:
-        st.image("assets/CHMMS_logo_reduzida-16.png", width=180)
-    except Exception as e:
-        st.warning("Arquivos de imagem não encontrados.")
-    
-    # Adiciona o botão "Voltar" se uma simulação já foi escolhida
-    if st.session_state.tipo_simulacao is not None:
-        st.button("↩️ Voltar ao Menu", on_click=go_home, use_container_width=True)
+def abrir_pagina(nome):
+    """Navega na mesma aba usando o roteamento nativo do Streamlit."""
+    st.switch_page(PAGINAS[nome])
 
 
-# --- Página Principal ---
-# 3. Lógica de renderização: ou mostra o menu, ou a simulação.
-if st.session_state.tipo_simulacao is None:
-    # --- ESTADO INICIAL: MOSTRA O MENU PRINCIPAL ---
-    st.title("Simulador de Cenários do Laboratório Central")
+def renderizar_sidebar(mostrar_inicio=False, mostrar_laboratorio=False):
+    with st.sidebar:
+        try:
+            st.image("assets/CHMMS_logo_reduzida-16.png", width=180)
+        except Exception:
+            st.warning("Arquivos de imagem não encontrados.")
+
+        if mostrar_inicio and st.button(
+            "⌂ Início",
+            use_container_width=True,
+            key="nav_inicio",
+        ):
+            st.session_state.pop("cto_tela", None)
+            abrir_pagina("inicio")
+
+        if mostrar_laboratorio and st.button(
+            "↩ Voltar aos simuladores",
+            use_container_width=True,
+            key="nav_laboratorio",
+        ):
+            abrir_pagina("laboratorio")
+
+
+def pagina_inicio():
+    renderizar_sidebar()
+
+    st.title("Simulador Laboratório Geral")
+    st.markdown("### Qual área você deseja acessar?")
+    st.write(
+        "Escolha o Laboratório Central ou CTO para acessar os simuladores "
+        "operacionais de cada um, respectivamente."
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col_lab, espacador, col_cto = st.columns([1, 0.12, 1])
+
+    with col_lab:
+        if st.button(
+            "🧪 Laboratório Central",
+            use_container_width=True,
+            type="primary",
+        ):
+            abrir_pagina("laboratorio")
+
+    with col_cto:
+        if st.button(
+            "👷 Controle Tecnológico",
+            use_container_width=True,
+        ):
+            abrir_pagina("cto")
+
+
+def pagina_laboratorio():
+    renderizar_sidebar(mostrar_inicio=True)
+
+    st.title("Simuladores do Laboratório Central")
     st.markdown("### Selecione o tipo de simulação que deseja executar:")
-    
-    st.markdown("<br>", unsafe_allow_html=True) # Espaço
-    
-    col1, col2, col3 = st.columns([1, 0.1, 1]) # Coluna do meio para espaçamento
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col1, espacador, col2 = st.columns([1, 0.12, 1])
 
     with col1:
-        st.button(
+        if st.button(
             "📈 Simular Capacidade",
-            on_click=set_simulacao,
-            args=('Capacidade',), # Argumento para a função set_simulacao
             use_container_width=True,
-            type="primary"
+            type="primary",
+        ):
+            abrir_pagina("capacidade")
+
+        st.info(
+            "Otimize a quantidade de recursos para atender uma demanda "
+            "dentro de um prazo específico."
         )
-        st.info("Otimize a quantidade de recursos (prensas, bancadas, etc.) para atender a uma demanda dentro de um prazo específico.")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.button(
-                "💰 Pricing Propostas",
-                on_click=set_simulacao,
-                args=('Precos',),
-                use_container_width=True,
-                type="primary"
-            )
-        st.info("Adicione propostas para ter uma combinação de preços que maximiza a receita e a chance de fechamento.")
 
-    with col3:
-        st.button(
-            "🗓️ Simular Prazos",
-            on_click=set_simulacao,
-            args=('Prazos',),
-            use_container_width=True
+        if st.button(
+            "💰 Pricing Propostas",
+            use_container_width=True,
+        ):
+            abrir_pagina("precos")
+
+        st.info(
+            "Encontre uma combinação de preços que maximize a receita e a "
+            "chance de fechamento."
         )
-        st.info("Estime o prazo de conclusão de uma carteira de ensaios com a configuração de recursos atual.")
-    
-    #st.markdown("<br>", unsafe_allow_html=True)
-    #c1, c2, c3 = st.columns([0.55, 1, 0.55])
-        
 
-else:
-    # --- ESTADO SECUNDÁRIO: MOSTRA A SIMULAÇÃO ESCOLHIDA ---
-    if st.session_state.tipo_simulacao == 'Capacidade':
-        sim_capacidade.render()
-    elif st.session_state.tipo_simulacao == 'Prazos':
-        sim_prazos.render()
-    elif st.session_state.tipo_simulacao == 'Precos':
-        sim_precos.render()
+    with col2:
+        if st.button(
+            "🗓️ Simular Prazos",
+            use_container_width=True,
+        ):
+            abrir_pagina("prazos")
+
+        st.info(
+            "Estime o prazo de conclusão de uma carteira de ensaios com a "
+            "configuração atual de recursos."
+        )
+
+
+def pagina_capacidade():
+    renderizar_sidebar(mostrar_inicio=True, mostrar_laboratorio=True)
+    sim_capacidade.render()
+
+
+def pagina_prazos():
+    renderizar_sidebar(mostrar_inicio=True, mostrar_laboratorio=True)
+    sim_prazos.render()
+
+
+def pagina_precos():
+    renderizar_sidebar(mostrar_inicio=True, mostrar_laboratorio=True)
+    sim_precos.render()
+
+
+def pagina_cto():
+    renderizar_sidebar(mostrar_inicio=True)
+    sim_cto.render()
+
+
+PAGINAS = {
+    "inicio": st.Page(
+        pagina_inicio,
+        title="Início",
+        icon="🏠",
+        default=True,
+    ),
+    "laboratorio": st.Page(
+        pagina_laboratorio,
+        title="Laboratório Central",
+        icon="🧪",
+        url_path="laboratorio",
+    ),
+    "capacidade": st.Page(
+        pagina_capacidade,
+        title="Simular Capacidade",
+        icon="📈",
+        url_path="capacidade",
+    ),
+    "prazos": st.Page(
+        pagina_prazos,
+        title="Simular Prazos",
+        icon="🗓️",
+        url_path="prazos",
+    ),
+    "precos": st.Page(
+        pagina_precos,
+        title="Pricing Propostas",
+        icon="💰",
+        url_path="pricing",
+    ),
+    "cto": st.Page(
+        pagina_cto,
+        title="Controle Tecnológico",
+        icon="👷",
+        url_path="cto",
+    ),
+}
+
+navegacao = st.navigation(list(PAGINAS.values()), position="hidden")
+navegacao.run()

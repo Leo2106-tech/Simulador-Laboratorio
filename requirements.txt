@@ -3,9 +3,14 @@ pandas==2.3.2
 numpy==2.3.3
 google-api-python-client==2.182.0
 google-auth-oauthlib==1.2.2
+google-auth
 openpyxl==3.1.5
 matplotlib==3.10.6
 xgboost==3.2.0
 scikit-learn==1.8.0
 imbalanced-learn==0.14.1
 altair==5.5.0
+pulp
+highspy
+requests
+geopy
