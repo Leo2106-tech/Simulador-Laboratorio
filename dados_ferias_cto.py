@@ -420,13 +420,9 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
         pd.read_excel(arq_alocacao, sheet_name="Localidade"),
         {
             "projeto": ["Projeto"],
-            "cidade_projeto": [
-                "Cidade", "Local", "Localidade", "Cidade do projeto", "Cidade Projeto"
-            ],
-            "inicio_projeto": ["Início", "Data início", "Início projeto", "Início do projeto"],
-            "fim_projeto": [
-                "Fim", "Término", "Termino", "Data fim", "Fim projeto", "Fim do projeto"
-            ],
+            "cidade_projeto": ["Local"],
+            "inicio_projeto": ["Inicio"],
+            "fim_projeto": ["Término"],
         },
         "Localidade",
     )
@@ -434,11 +430,8 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
     df_disp = selecionar_colunas_por_cabecalho(
         pd.read_excel(arq_alocacao, sheet_name="Disponibilidade"),
         {
-            "matricula": ["Matrícula", "Matricula"],
-            "muda_turno": [
-                "Muda turno", "Muda de turno", "Mudança de turno",
-                "Flexibilidade de turno", "Aceita mudança de turno?",
-            ],
+            "matricula": ["Matricula"],
+            "muda_turno": ["Disponível para outro turno? (Sim/Não)"],
         },
         "Disponibilidade",
     )
