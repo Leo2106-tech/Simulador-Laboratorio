@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""Carregamento e validação dos dados do agendador de férias do CTO."""
-
 import math
 import time
 import unicodedata
@@ -180,17 +178,25 @@ def carregar_solicitacoes_ferias_pendentes():
     """Carrega solicitacoes ainda nao aprovadas para selecao no Streamlit."""
     arq_ferias = PROJECT_DIR / "Controle de Férias LAB_CTO.xlsx"
     arq_alocacao = PROJECT_DIR / "Alocação Atualizada.xlsx"
-    df = pd.read_excel(
-        arq_ferias,
-        sheet_name="Respostas ao formulário",
-        usecols="B:E,H",
+    df = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_ferias, sheet_name="Respostas ao formulário"),
+        {
+            "nome": ["Qual é o seu nome?"],
+            "matricula": ["Qual é a sua matrícula?", "Qual e a sua matricula?"],
+            "inicio": ["Qual é a data de início das férias?"],
+            "fim": ["Qual é a data de término das férias?"],
+            "aprovacao": ["Aprovação pelo gestor"],
+        },
+        "Respostas ao formulário",
     )
-    df_cargos = pd.read_excel(
-        arq_alocacao,
-        sheet_name="Alocação",
-        usecols="A,D",
+    df_cargos = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_alocacao, sheet_name="Alocação"),
+        {
+            "matricula": ["Matrícula", "Matricula"],
+            "cargo": ["Cargo atualizado", "Cargo"],
+        },
+        "Alocação",
     )
-    df_cargos.columns = ["matricula", "cargo"]
     df_cargos["matricula"] = df_cargos["matricula"].apply(normalizar_matricula)
     df_cargos["cargo_norm"] = df_cargos["cargo"].map(normalizar_cargo_detalhado)
     matriculas_cargos_validos = set(
@@ -199,7 +205,6 @@ def carregar_solicitacoes_ferias_pendentes():
             "matricula",
         ]
     )
-    df.columns = ["nome", "matricula", "inicio", "fim", "aprovacao"]
     df["linha_planilha"] = df.index + 2
     df["matricula"] = df["matricula"].apply(normalizar_matricula)
     df["nome"] = df["nome"].fillna("").astype(str).str.strip()
@@ -320,6 +325,26 @@ def localizar_coluna(df, candidatos):
             return mapa[chave]
     return None
 
+
+def selecionar_colunas_por_cabecalho(df, mapeamento, nome_aba):
+    """Seleciona e renomeia colunas sem depender da letra/posicao na planilha."""
+    selecionadas = {}
+    faltantes = []
+    for nome_interno, candidatos in mapeamento.items():
+        coluna_original = localizar_coluna(df, candidatos)
+        if coluna_original is None:
+            faltantes.append(" / ".join(candidatos))
+        else:
+            selecionadas[coluna_original] = nome_interno
+    if faltantes:
+        cabecalhos = ", ".join(str(c).strip() for c in df.columns)
+        raise ErroValidacaoDados(
+            f"A aba '{nome_aba}' não contém o(s) cabeçalho(s) esperado(s): "
+            + "; ".join(faltantes)
+            + f". Cabeçalhos encontrados: {cabecalhos}."
+        )
+    return df[list(selecionadas)].rename(columns=selecionadas).copy()
+
 def classificar_turno(valor):
     txt = str(valor).strip().lower()
     if txt in {"a", "b", "adm", "nan", ""}:
@@ -376,40 +401,60 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
     data_para_t = {data.normalize(): idx + 1 for idx, data in enumerate(datas)}
     t_para_data = {idx + 1: data.normalize() for idx, data in enumerate(datas)}
 
-    df_aloc = pd.read_excel(arq_alocacao, sheet_name="Alocação", usecols="A:B,D,E,G,H,P,T")
-    df_aloc.columns = [
-        "matricula",
-        "nome_alocacao",
-        "cargo",
-        "projeto_original",
-        "turno_original",
-        "tipo",
-        "cidade",
-        "data_demissao",
-    ]
-
-    df_localidade = pd.read_excel(arq_alocacao, sheet_name="Localidade", usecols="A:D")
-    df_localidade.columns = ["projeto", "cidade_projeto", "inicio_projeto", "fim_projeto"]
-
-    df_disp = pd.read_excel(arq_alocacao, sheet_name="Disponibilidade", usecols="A,F")
-    df_disp.columns = ["matricula", "muda_turno"]
-
-    df_controle = pd.read_excel(
-        arq_ferias,
-        sheet_name="Controle de Férias",
-        usecols="A,B,I,L,M,P,R,S,U",
+    df_aloc = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_alocacao, sheet_name="Alocação"),
+        {
+            "matricula": ["Matrícula", "Matricula"],
+            "nome_alocacao": ["Nome do colaborador", "Nome"],
+            "cargo": ["Cargo atualizado", "Cargo"],
+            "projeto_original": ["Projeto"],
+            "turno_original": ["Turno"],
+            "tipo": ["Suplente"],
+            "cidade": ["Cidade"],
+            "data_demissao": ["Data Demissão", "Data Demissao"],
+        },
+        "Alocação",
     )
-    df_controle.columns = [
-        "matricula",
-        "nome",
-        "fim_aquisitivo",
-        "dias_restantes",
-        "limite_gozo",
-        "inicio_ferias_1",
-        "fim_ferias_1",
-        "inicio_ferias_2",
-        "fim_ferias_2",
-    ]
+
+    df_localidade = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_alocacao, sheet_name="Localidade"),
+        {
+            "projeto": ["Projeto"],
+            "cidade_projeto": ["Cidade", "Localidade", "Cidade do projeto", "Cidade Projeto"],
+            "inicio_projeto": ["Início", "Data início", "Início projeto", "Início do projeto"],
+            "fim_projeto": ["Fim", "Data fim", "Fim projeto", "Fim do projeto"],
+        },
+        "Localidade",
+    )
+
+    df_disp = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_alocacao, sheet_name="Disponibilidade"),
+        {
+            "matricula": ["Matrícula", "Matricula"],
+            "muda_turno": [
+                "Muda turno", "Muda de turno", "Mudança de turno",
+                "Flexibilidade de turno", "Aceita mudança de turno?",
+            ],
+        },
+        "Disponibilidade",
+    )
+
+    df_controle = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_ferias, sheet_name="Controle de Férias"),
+        {
+            "matricula": ["Matricula", "Matrícula"],
+            "nome": ["Empregado", "Nome"],
+            "fim_aquisitivo": ["Fim aquisitivo"],
+            "dias_restantes": ["Dias restante", "Dias restantes"],
+            "limite_gozo": ["Limite p/ gozo", "Limite para gozo"],
+            "inicio_ferias_1": ["Início férias", "Inicio ferias"],
+            "fim_ferias_1": ["Fim Férias", "Fim Ferias"],
+            "inicio_ferias_2": ["Início férias 1", "Inicio ferias 1"],
+            "fim_ferias_2": ["Fim Férias 1", "Fim Ferias 1"],
+        },
+        "Controle de Férias",
+    )
+    qtd_controle_lido = len(df_controle)
 
     df_aloc = df_aloc.dropna(subset=["matricula"]).copy()
     df_aloc = df_aloc[df_aloc["data_demissao"].isna()].copy()
@@ -497,6 +542,7 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
         & (df_controle["fim_aquisitivo"] < data_inicio)
         & (df_controle["limite_gozo"] >= data_inicio)
     ].copy()
+    qtd_controle_no_horizonte = len(df_controle)
     df_controle = (
         df_controle.sort_values("limite_gozo", ascending=True)
         .drop_duplicates(subset=["matricula"], keep="first")
@@ -510,6 +556,15 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
 
     matriculas_validas = set(I_A + I_E)
     df_controle = df_controle[df_controle["matricula"].isin(matriculas_validas)].copy()
+    if df_controle.empty:
+        raise ErroValidacaoDados(
+            "Nenhum registro válido de férias foi encontrado para o horizonte do modelo. "
+            f"Foram lidas {qtd_controle_lido} linha(s) na aba 'Controle de Férias'; "
+            f"{qtd_controle_no_horizonte} permaneceram após validar 'Fim aquisitivo' e "
+            "'Limite p/ gozo', e nenhuma correspondeu às matrículas válidas da aba "
+            "'Alocação'. Verifique os cabeçalhos Matricula, Fim aquisitivo, Dias restante "
+            "e Limite p/ gozo, além das matrículas cadastradas."
+        )
 
     cargo = dict(zip(df_aloc["matricula"], df_aloc["cargo"]))
     cidade = dict(zip(df_aloc["matricula"], df_aloc["cidade"]))
@@ -799,6 +854,17 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
         i: len(ferias_programadas_datas_total.get(i, set()))
         for i in I
     }
+    total_saldo_ferias = sum(max(int(b.get(i, 0)), 0) for i in I_A + I_E)
+    total_dias_programados = sum(
+        dias_ferias_programadas_total.get(i, 0) for i in I_A + I_E
+    )
+    if total_saldo_ferias <= 0 and total_dias_programados <= 0:
+        raise ErroValidacaoDados(
+            "A aba 'Controle de Férias' foi lida, mas todos os funcionários ficaram "
+            "com zero dias de férias. Verifique se 'Dias restante' contém números e se "
+            "os períodos em 'Início férias'/'Fim Férias' e "
+            "'Início férias 1'/'Fim Férias 1' estão preenchidos corretamente."
+        )
 
     a = {(rho, r): 0 for rho in R for r in R}
     for rho in R:
