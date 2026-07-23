@@ -28,6 +28,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MIME_GOOGLE_SHEETS = "application/vnd.google-apps.spreadsheet"
 
 # Nomes exatos que dados_ferias_cto.py procura na pasta temporaria.
 NOME_ALOCACAO = "Alocação Atualizada.xlsx"
@@ -114,16 +115,41 @@ def _verificar_resposta(resp, planilha_id, operacao):
     return resp
 
 
-def _exportar_xlsx(session, file_id, destino):
-    url = f"https://www.googleapis.com/drive/v3/files/{file_id}/export"
-    resp = session.get(url, params={"mimeType": MIME_XLSX})
-    _verificar_resposta(resp, file_id, "baixar dados de entrada")
-    Path(destino).write_bytes(resp.content)
+def _baixar_arquivo_xlsx(session, file_id, destino):
+    """Baixa tanto uma planilha Google quanto um arquivo Excel do Drive."""
+    url_arquivo = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+
+    resposta_metadados = session.get(
+        url_arquivo,
+        params={"fields": "mimeType", "supportsAllDrives": "true"},
+    )
+    _verificar_resposta(
+        resposta_metadados,
+        file_id,
+        "identificar o tipo do arquivo de entrada",
+    )
+    mime_type = resposta_metadados.json().get("mimeType")
+
+    if mime_type == MIME_GOOGLE_SHEETS:
+        resposta_arquivo = session.get(
+            f"{url_arquivo}/export",
+            params={"mimeType": MIME_XLSX},
+        )
+        operacao = "exportar planilha Google como XLSX"
+    else:
+        resposta_arquivo = session.get(
+            url_arquivo,
+            params={"alt": "media", "supportsAllDrives": "true"},
+        )
+        operacao = "baixar arquivo XLSX"
+
+    _verificar_resposta(resposta_arquivo, file_id, operacao)
+    Path(destino).write_bytes(resposta_arquivo.content)
 
 
 @st.cache_data(show_spinner="Carregando planilhas do Google...")
 def baixar_planilhas():
-    """Exporta as tres entradas para uma pasta temporaria do servidor."""
+    """Baixa as tres entradas para uma pasta temporaria do servidor."""
     pasta = Path(tempfile.mkdtemp(prefix="ferias_cto_"))
     session = _sessao()
     arquivos = {
@@ -132,7 +158,7 @@ def baixar_planilhas():
         "flexibilidade_operacional": pasta / NOME_FLEXIBILIDADE,
     }
     for nome, destino in arquivos.items():
-        _exportar_xlsx(session, _id_planilha(nome), destino)
+        _baixar_arquivo_xlsx(session, _id_planilha(nome), destino)
     return str(pasta)
 
 
