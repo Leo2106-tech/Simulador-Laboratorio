@@ -1,5 +1,10 @@
 # sim_cto.py
 import io
+import os
+import sys
+import time
+import traceback
+from datetime import datetime
 from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -20,6 +25,132 @@ from resultados_tatico import extrair_resultados_tatico
 TIME_LIMIT = 300   # segundos
 GAP = 0.05         # 5%
 NOME_BASELINE_LOCAL = "Baseline_Resultados_Tatico.xlsx"
+VERSAO_LOG_CTO = "2026-07-27-v2"
+
+
+class _ConsoleBruto:
+    """Escreve diretamente no descritor do processo, sem passar pelo Streamlit."""
+
+    encoding = "utf-8"
+
+    def __init__(self, descritor):
+        self.descritor = descritor
+
+    def write(self, texto):
+        if not texto:
+            return 0
+        dados = str(texto).encode(self.encoding, errors="backslashreplace")
+        os.write(self.descritor, dados)
+        return len(texto)
+
+    def flush(self):
+        return None
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        return self.descritor
+
+
+_CONSOLE_STDOUT = _ConsoleBruto(1)
+_CONSOLE_STDERR = _ConsoleBruto(2)
+
+
+class _SaidaDuplicada:
+    """Escreve no log capturado e também no console da Streamlit Cloud."""
+
+    def __init__(self, *destinos, ao_escrever=None):
+        self.destinos = destinos
+        self.ao_escrever = ao_escrever
+
+    def write(self, texto):
+        for destino in self.destinos:
+            destino.write(texto)
+            if "\n" in texto:
+                destino.flush()
+        if self.ao_escrever is not None and "\n" in texto:
+            self.ao_escrever()
+        return len(texto)
+
+    def flush(self):
+        for destino in self.destinos:
+            destino.flush()
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        return self.destinos[-1].fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self.destinos[-1], "encoding", "utf-8")
+
+
+class _AtualizadorPainelLog:
+    """Mostra no app as linhas mais recentes sem sobrecarregar a interface."""
+
+    def __init__(self, painel, log, intervalo=1.0, max_linhas=250):
+        self.painel = painel
+        self.log = log
+        self.intervalo = intervalo
+        self.max_linhas = max_linhas
+        self.ultima_atualizacao = 0.0
+
+    def __call__(self, forcar=False):
+        agora = time.monotonic()
+        if not forcar and agora - self.ultima_atualizacao < self.intervalo:
+            return
+        linhas = self.log.getvalue().splitlines()
+        trecho = "\n".join(linhas[-self.max_linhas:])
+        if len(linhas) > self.max_linhas:
+            trecho = f"... {len(linhas) - self.max_linhas} linha(s) anterior(es) ocultada(s) ...\n{trecho}"
+        self.painel.code(trecho or "Aguardando a primeira mensagem do modelo...", language="text")
+        self.ultima_atualizacao = agora
+
+
+def _registrar_evento(mensagem, *, erro=False):
+    destino = sys.stderr if erro else sys.stdout
+    agora = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"[CTO-LOG {VERSAO_LOG_CTO} {agora}] {mensagem}", file=destino, flush=True)
+
+
+def _registrar_excecao(contexto):
+    _registrar_evento(f"ERRO em {contexto}", erro=True)
+    traceback.print_exc(file=sys.stderr)
+    sys.stderr.flush()
+
+
+def _memoria_maxima_mb():
+    """Retorna o pico de RSS no Linux da nuvem; None em plataformas sem suporte."""
+    try:
+        import resource
+
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        # Linux reporta KiB; macOS reporta bytes.
+        if sys.platform == "darwin":
+            rss /= 1024.0
+        return rss / 1024.0
+    except Exception:
+        return None
+
+
+def _resumo_dimensoes_dados(dados):
+    partes = []
+    for chave in ("I_A", "I_E", "I_S", "T"):
+        valor = dados.get(chave, ())
+        try:
+            partes.append(f"{chave}={len(valor):,}")
+        except TypeError:
+            pass
+    return " | ".join(partes)
+
+
+# Esta mensagem deve aparecer no log da nuvem assim que a página importar este módulo.
+_CONSOLE_STDERR.write(
+    f"[CTO-LOG {VERSAO_LOG_CTO}] Módulo sim_cto carregado; saída direta ativa.\n"
+)
 
 
 def usando_google():
@@ -59,18 +190,39 @@ def carregar_dados_base(solicitacoes_aprovadas_teste=()):
     Nuvem: exporta as planilhas para uma pasta temporaria do servidor Streamlit.
     Local: usa o PROJECT_DIR que o próprio modelo já define (a pasta dos .py).
     """
-    if usando_google():
-        from conexao_google import baixar_planilhas
-        dados_ferias_cto.PROJECT_DIR = Path(baixar_planilhas())
-    solicitacoes = [
-        {"matricula": matricula, "inicio": inicio, "fim": fim}
-        for matricula, inicio, fim in solicitacoes_aprovadas_teste
-    ]
     log = io.StringIO()
-    with redirect_stdout(log):
-        dados = dados_ferias_cto.carregar_dados(
-            solicitacoes_aprovadas_teste=solicitacoes
-        )
+    console_stdout, console_stderr = _CONSOLE_STDOUT, _CONSOLE_STDERR
+    saida = _SaidaDuplicada(log, console_stdout)
+    erros = _SaidaDuplicada(log, console_stderr)
+    inicio = time.perf_counter()
+    with redirect_stdout(saida), redirect_stderr(erros):
+        try:
+            _registrar_evento(
+                "Iniciando carga de dados "
+                f"| solicitações_teste={len(solicitacoes_aprovadas_teste):,} "
+                f"| fonte={'Google' if usando_google() else 'local'}"
+            )
+            if usando_google():
+                from conexao_google import baixar_planilhas
+
+                dados_ferias_cto.PROJECT_DIR = Path(baixar_planilhas())
+            solicitacoes = [
+                {"matricula": matricula, "inicio": inicio_sol, "fim": fim}
+                for matricula, inicio_sol, fim in solicitacoes_aprovadas_teste
+            ]
+            dados = dados_ferias_cto.carregar_dados(
+                solicitacoes_aprovadas_teste=solicitacoes
+            )
+            memoria = _memoria_maxima_mb()
+            memoria_txt = f" | pico_rss={memoria:,.1f} MB" if memoria is not None else ""
+            _registrar_evento(
+                "Carga de dados concluída "
+                f"| duração={time.perf_counter() - inicio:,.1f}s "
+                f"| {_resumo_dimensoes_dados(dados)}{memoria_txt}"
+            )
+        except (Exception, SystemExit):
+            _registrar_excecao("carregar_dados_base")
+            raise
     return dados, log.getvalue()
 
 
@@ -91,18 +243,54 @@ def extrair_aviso_distancia(log):
 # =========================================================================
 #                 EXECUÇÃO DO MODELO E RESULTADOS
 # =========================================================================
-def rodar_modelo(dados, time_limit, gap, log_inicial=""):
+def rodar_modelo(dados, time_limit, gap, log_inicial="", painel_log=None):
     log = io.StringIO()
     if log_inicial:
         log.write(log_inicial.rstrip() + "\n\n")
-    with redirect_stdout(log), redirect_stderr(log):
-        print("Iniciando resolucao do modelo tatico...")
-        model, status, variaveis = resolver_modelo_tatico(
-            dados, time_limit=time_limit, gap=gap, config={}
-        )
-        print("Extraindo tabelas de resultado...")
-        resultados = extrair_resultados_tatico(dados, model, status, variaveis)
-        print("Resultados extraidos.")
+    atualizador = _AtualizadorPainelLog(painel_log, log) if painel_log is not None else None
+    console_stdout, console_stderr = _CONSOLE_STDOUT, _CONSOLE_STDERR
+    saida = _SaidaDuplicada(log, console_stdout, ao_escrever=atualizador)
+    erros = _SaidaDuplicada(log, console_stderr, ao_escrever=atualizador)
+    inicio_total = time.perf_counter()
+    if atualizador is not None:
+        atualizador(forcar=True)
+    with redirect_stdout(saida), redirect_stderr(erros):
+        try:
+            _registrar_evento(
+                "Iniciando modelo tático "
+                f"| time_limit={time_limit}s | gap={gap:.2%} "
+                f"| {_resumo_dimensoes_dados(dados)}"
+            )
+            inicio_solver = time.perf_counter()
+            model, status, variaveis = resolver_modelo_tatico(
+                dados, time_limit=time_limit, gap=gap, config={}
+            )
+            memoria = _memoria_maxima_mb()
+            memoria_txt = f" | pico_rss={memoria:,.1f} MB" if memoria is not None else ""
+            _registrar_evento(
+                "Solver encerrado "
+                f"| status={pl.LpStatus[status]} "
+                f"| duração_solver={time.perf_counter() - inicio_solver:,.1f}s"
+                f"{memoria_txt}"
+            )
+
+            inicio_extracao = time.perf_counter()
+            _registrar_evento("Iniciando extração das tabelas de resultado")
+            resultados = extrair_resultados_tatico(dados, model, status, variaveis)
+            _registrar_evento(
+                "Extração das tabelas concluída "
+                f"| duração={time.perf_counter() - inicio_extracao:,.1f}s "
+                f"| duração_total={time.perf_counter() - inicio_total:,.1f}s"
+            )
+        except (Exception, SystemExit):
+            memoria = _memoria_maxima_mb()
+            if memoria is not None:
+                _registrar_evento(f"Pico de memória antes do erro: {memoria:,.1f} MB", erro=True)
+            _registrar_excecao("rodar_modelo")
+            raise
+        finally:
+            if atualizador is not None:
+                atualizador(forcar=True)
     return resultados, pl.LpStatus[status], log.getvalue()
 
 
@@ -480,6 +668,18 @@ def tabela_comparacao(metricas_baseline, metricas_simulacao):
 def render():
     aplicar_estilo_personalizado()
 
+    # Diagnóstico temporário sempre visível, inclusive antes de clicar em executar.
+    st.warning(f"Diagnóstico visual ativo — versão {VERSAO_LOG_CTO}")
+    st.caption(
+        "Este quadro é exibido diretamente pelo sim_cto.py e será atualizado durante a execução."
+    )
+    painel_log = st.empty()
+    painel_log.code(
+        f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
+        f"Página CTO carregada. Diagnóstico {VERSAO_LOG_CTO} pronto.",
+        language="text",
+    )
+
     if not usando_google():
         st.error(
             "A conexão com o Google ainda não foi configurada. No Streamlit Cloud, "
@@ -637,6 +837,12 @@ def render():
     gerar = st.button(texto_gerar, type="primary", width="stretch")
 
     if gerar:
+        painel_log.code(
+            f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
+            "Botão de execução acionado.\n"
+            "Iniciando leitura e preparação dos dados...",
+            language="text",
+        )
         metricas_baseline = None
         if modo_simulacao:
             metricas_baseline = st.session_state.get("cto_baseline_metricas")
@@ -660,6 +866,12 @@ def render():
         # 1) Carrega os dados.
         try:
             dados, log_dados = carregar_dados_base(solicitacoes_para_modelo)
+            painel_log.code(
+                (log_dados.rstrip() + "\n\nDados carregados. Preparando o otimizador...")
+                if log_dados
+                else "Dados carregados. Preparando o otimizador...",
+                language="text",
+            )
             progresso.update(label="Dados carregados. Resolvendo o modelo...", state="running")
         except dados_ferias_cto.ErroValidacaoDados as e:
             progresso.update(label="Dados de cadastro incompletos.", state="error")
@@ -675,7 +887,6 @@ def render():
             return
 
         aviso_dist = extrair_aviso_distancia(log_dados)
-
         # 2) Resolve o modelo para o ano inteiro.
         try:
             with st.spinner("Resolvendo o modelo tático (pode levar alguns minutos)..."):
@@ -684,6 +895,7 @@ def render():
                     TIME_LIMIT,
                     GAP,
                     log_inicial=log_dados,
+                    painel_log=painel_log,
                 )
             progresso.update(label=f"Modelo finalizado. Status: {status_str}", state="complete")
         except SystemExit as e:
