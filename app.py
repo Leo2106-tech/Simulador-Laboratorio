@@ -1,10 +1,6 @@
 import streamlit as st
 
 from style import aplicar_estilo_personalizado
-import sim_capacidade
-import sim_cto
-import sim_prazos
-import sim_precos
 
 
 st.set_page_config(
@@ -129,21 +125,29 @@ def pagina_laboratorio():
 
 
 def pagina_capacidade():
+    import sim_capacidade
+
     renderizar_sidebar(mostrar_inicio=True, mostrar_laboratorio=True)
     sim_capacidade.render()
 
 
 def pagina_prazos():
+    import sim_prazos
+
     renderizar_sidebar(mostrar_inicio=True, mostrar_laboratorio=True)
     sim_prazos.render()
 
 
 def pagina_precos():
+    import sim_precos
+
     renderizar_sidebar(mostrar_inicio=True, mostrar_laboratorio=True)
     sim_precos.render()
 
 
 def pagina_cto():
+    import sim_cto
+
     renderizar_sidebar(mostrar_inicio=True)
     sim_cto.render()
 

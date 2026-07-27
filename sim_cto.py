@@ -1,5 +1,6 @@
 # sim_cto.py
 import io
+import time
 from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -17,7 +18,10 @@ from modelo_ferias_cto import resolver_modelo_tatico
 from resultados_tatico import extrair_resultados_tatico
 
 # Parâmetros fixos do solver (sem controles na tela).
-TIME_LIMIT = 300   # segundos
+# O limite começa no clique e cobre carga, preparação, geração de colunas,
+# auditoria e MIP enxuto.
+# O MIP final permanece sem limite de tempo.
+TIME_LIMIT = 300   # segundos antes do MIP final
 GAP = 0.05         # 5%
 NOME_BASELINE_LOCAL = "Baseline_Resultados_Tatico.xlsx"
 
@@ -637,6 +641,7 @@ def render():
     gerar = st.button(texto_gerar, type="primary", width="stretch")
 
     if gerar:
+        inicio_orcamento_pre_mip = time.monotonic()
         metricas_baseline = None
         if modo_simulacao:
             metricas_baseline = st.session_state.get("cto_baseline_metricas")
@@ -679,9 +684,13 @@ def render():
         # 2) Resolve o modelo para o ano inteiro.
         try:
             with st.spinner("Resolvendo o modelo tático (pode levar alguns minutos)..."):
+                tempo_restante_pre_mip = max(
+                    0.01,
+                    TIME_LIMIT - (time.monotonic() - inicio_orcamento_pre_mip),
+                )
                 resultados, status_str, log_modelo = rodar_modelo(
                     dados,
-                    TIME_LIMIT,
+                    tempo_restante_pre_mip,
                     GAP,
                     log_inicial=log_dados,
                 )
