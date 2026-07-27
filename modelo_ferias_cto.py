@@ -2583,7 +2583,10 @@ def gerar_colunas(
             "iteracao": it, "fo_lp": fo_lp, "gap_melhoria": melhoria_gap, 
             "tempo_iteracao_s": tempo_iter, "tempo_total_s": tempo_total,
             "novos_blocos_ferias": len(novas_chaves_blocos),
-            "novas_rotas": adicionadas_reais, "menor_custo_reduzido": menor_rc,
+            "novas_rotas": adicionadas_reais,
+            # Nome legado ainda consumido pela planilha de diagnóstico.
+            "adicionadas": adicionadas_reais,
+            "menor_custo_reduzido": menor_rc,
             "colunas_totais": total_rotas, **diag_ferias
         })
         print(

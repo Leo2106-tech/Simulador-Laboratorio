@@ -322,14 +322,14 @@ def extrair_resultados_tatico(dados, model, status, variaveis):
         })
     for item in historico_colunas:
         linhas_planos_diag.append({
-            "matricula": f"pricing_iter_{item['iteracao']}",
+            "matricula": f"pricing_iter_{item.get('iteracao', '')}",
             "tipo": "pricing",
             "cargo": "",
             "cidade": "",
             "qtd_blocos_candidatos": "",
-            "qtd_blocos_escolhidos": item["adicionadas"],
+            "qtd_blocos_escolhidos": item.get("adicionadas", item.get("novas_rotas", 0)),
             "min_dias_novos_bloco": "",
-            "max_dias_novos_bloco": item["menor_custo_reduzido"],
+            "max_dias_novos_bloco": item.get("menor_custo_reduzido"),
         })
 
     linhas_evolucao = []
@@ -408,7 +408,7 @@ def extrair_resultados_tatico(dados, model, status, variaveis):
             "pricing_baldes_ie": item.get("baldes_ie"),
             "pricing_baldes_is": item.get("baldes_is"),
             "pricing_parou_por_tempo": item.get("parou_por_tempo"),
-            "colunas_adicionadas": item.get("adicionadas"),
+            "colunas_adicionadas": item.get("adicionadas", item.get("novas_rotas")),
             "colunas_totais": item.get("colunas_totais"),
             "menor_custo_reduzido": item.get("menor_custo_reduzido"),
             "ganho_marginal_coluna": item.get("ganho_marginal_coluna"),
