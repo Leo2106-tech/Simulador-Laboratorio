@@ -2458,7 +2458,7 @@ def gerar_colunas(
             z_bloco = vars_lp["z"][tarefa["bloco_chave"]]
             nova_cons = pl.LpConstraint(
                 e=(new_u - z_bloco),
-                sense=pl.LpEqual,
+                sense=pl.LpConstraintEQ,
                 rhs=0,
                 name=nome_cons,
             )
