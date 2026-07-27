@@ -1396,7 +1396,7 @@ def _podar_colunas_inativas(
     tolerancia_valor = float(config.get("poda_colunas_tolerancia_valor", 1e-8))
     tolerancia_rc = float(config.get("poda_colunas_tolerancia_custo_reduzido", 1e-7))
     paciencia = max(1, int(config.get("poda_colunas_paciencia", 5)))
-    inicio = max(1, int(config.get("poda_colunas_inicio_iteracao", 8)))
+    inicio = max(1, int(config.get("poda_colunas_inicio_iteracao", 5)))
     intervalo = max(1, int(config.get("poda_colunas_intervalo", 3)))
     idade_minima = max(1, int(config.get("poda_colunas_idade_minima", paciencia)))
     min_pool = max(0, int(config.get("poda_colunas_min_pool", 1000)))
@@ -1580,7 +1580,7 @@ def _podar_colunas_inativas_compacta(
     tolerancia_valor = float(config.get("poda_colunas_tolerancia_valor", 1e-8))
     tolerancia_rc = float(config.get("poda_colunas_tolerancia_custo_reduzido", 1e-7))
     paciencia = max(1, int(config.get("poda_colunas_paciencia", 5)))
-    inicio = max(1, int(config.get("poda_colunas_inicio_iteracao", 8)))
+    inicio = max(1, int(config.get("poda_colunas_inicio_iteracao", 5)))
     intervalo = max(1, int(config.get("poda_colunas_intervalo", 3)))
     min_pool = max(0, int(config.get("poda_colunas_min_pool", 1000)))
     fracao_max = min(
@@ -2629,7 +2629,7 @@ def gerar_colunas(
     if bool(config.get("usar_poda_colunas_inativas", True)):
         print(
             "  Poda de colunas inativas: ativa | "
-            f"inicio={int(config.get('poda_colunas_inicio_iteracao', 8))} | "
+            f"inicio={int(config.get('poda_colunas_inicio_iteracao', 5))} | "
             f"intervalo={int(config.get('poda_colunas_intervalo', 3))} | "
             f"paciencia={int(config.get('poda_colunas_paciencia', 5))} | "
             f"fracao_max={float(config.get('poda_colunas_fracao_max', 0.25)):.0%} | "
