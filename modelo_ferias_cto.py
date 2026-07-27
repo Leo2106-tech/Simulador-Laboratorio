@@ -1110,7 +1110,7 @@ def construir_mestre_colunas(
 
 
 def resolver_mestre_lp(model, time_limit=None):
-    kwargs = {"msg": False}
+    kwargs = {"msg": False, "threads": 1, "parallel": "off"}
     if time_limit is not None and time_limit > 0:
         kwargs["timeLimit"] = time_limit
     return model.solve(pl.HiGHS(**kwargs))
@@ -1690,7 +1690,14 @@ def _avaliar_plano_ferias_mini_mestre(
     custo_mobilizacao = float(dados.get("Cmob", 600.0)) * pl.lpSum(mobiliza[ch] for ch in mobiliza)
     model += custo_rotas + custo_falta + custo_contratacao + custo_mobilizacao
 
-    status = model.solve(pl.HiGHS(msg=False, timeLimit=tempo_solver))
+    status = model.solve(
+        pl.HiGHS(
+            msg=False,
+            timeLimit=tempo_solver,
+            threads=1,
+            parallel="off",
+        )
+    )
     diagnostico["ferias_mini_avaliados"] += 1
     if pl.LpStatus[status] not in ("Optimal", "Feasible"):
         diagnostico["ferias_mini_inviaveis"] += 1
@@ -3038,7 +3045,16 @@ def resolver_mip_final(dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas,
                 relaxado=False, fixacoes=fixacoes, warm_start=valores_lp
             )
             tempo_r = float(config.get("time_limit_mip_enxuto", 600.0))
-            st_r = mip_r.solve(pl.HiGHS(msg=True, timeLimit=tempo_r, gapRel=gap, options={"presolve": "on", "parallel": "on", "threads": 8}))
+            st_r = mip_r.solve(
+                pl.HiGHS(
+                    msg=True,
+                    timeLimit=tempo_r,
+                    gapRel=gap,
+                    threads=1,
+                    presolve="on",
+                    parallel="off",
+                )
+            )
             print(f"  MIP enxuto encerrado com status: {pl.LpStatus[st_r]}")
             if pl.LpStatus[st_r] in ("Optimal", "Feasible"):
                 warm_start_obj = float(pl.value(mip_r.objective) or 0.0)
@@ -3069,7 +3085,9 @@ def resolver_mip_final(dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas,
     solver_kwargs = {
         "msg": True,
         "gapRel": gap,
-        "options": {"presolve": "on", "parallel": "on", "threads": 8},
+        "threads": 1,
+        "presolve": "on",
+        "parallel": "off",
     }
     solver_cls = _HiGHSComWarmStart if warm_start else pl.HiGHS
     status = model.solve(solver_cls(**solver_kwargs))

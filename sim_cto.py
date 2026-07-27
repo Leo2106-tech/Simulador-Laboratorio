@@ -2,6 +2,7 @@
 import io
 import os
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -26,6 +27,7 @@ TIME_LIMIT = 300   # segundos
 GAP = 0.05         # 5%
 NOME_BASELINE_LOCAL = "Baseline_Resultados_Tatico.xlsx"
 VERSAO_LOG_CTO = "2026-07-27-v2"
+_TRAVA_SOLVER = threading.Lock()
 
 
 class _ConsoleBruto:
@@ -60,17 +62,14 @@ _CONSOLE_STDERR = _ConsoleBruto(2)
 class _SaidaDuplicada:
     """Escreve no log capturado e também no console da Streamlit Cloud."""
 
-    def __init__(self, *destinos, ao_escrever=None):
+    def __init__(self, *destinos):
         self.destinos = destinos
-        self.ao_escrever = ao_escrever
 
     def write(self, texto):
         for destino in self.destinos:
             destino.write(texto)
             if "\n" in texto:
                 destino.flush()
-        if self.ao_escrever is not None and "\n" in texto:
-            self.ao_escrever()
         return len(texto)
 
     def flush(self):
@@ -86,28 +85,6 @@ class _SaidaDuplicada:
     @property
     def encoding(self):
         return getattr(self.destinos[-1], "encoding", "utf-8")
-
-
-class _AtualizadorPainelLog:
-    """Mostra no app as linhas mais recentes sem sobrecarregar a interface."""
-
-    def __init__(self, painel, log, intervalo=1.0, max_linhas=250):
-        self.painel = painel
-        self.log = log
-        self.intervalo = intervalo
-        self.max_linhas = max_linhas
-        self.ultima_atualizacao = 0.0
-
-    def __call__(self, forcar=False):
-        agora = time.monotonic()
-        if not forcar and agora - self.ultima_atualizacao < self.intervalo:
-            return
-        linhas = self.log.getvalue().splitlines()
-        trecho = "\n".join(linhas[-self.max_linhas:])
-        if len(linhas) > self.max_linhas:
-            trecho = f"... {len(linhas) - self.max_linhas} linha(s) anterior(es) ocultada(s) ...\n{trecho}"
-        self.painel.code(trecho or "Aguardando a primeira mensagem do modelo...", language="text")
-        self.ultima_atualizacao = agora
 
 
 def _registrar_evento(mensagem, *, erro=False):
@@ -174,7 +151,7 @@ def limpar_cache():
 # =========================================================================
 #                 CARGA DE DADOS DO MODELO (CACHEADA)
 # =========================================================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=1)
 def carregar_solicitacoes_pendentes_base():
     """Carrega as opcoes exibidas no seletor de solicitacoes pendentes."""
     if usando_google():
@@ -183,7 +160,7 @@ def carregar_solicitacoes_pendentes_base():
     return dados_ferias_cto.carregar_solicitacoes_ferias_pendentes()
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=3)
 def carregar_dados_base(solicitacoes_aprovadas_teste=()):
     """Carrega os dados do modelo.
 
@@ -243,18 +220,11 @@ def extrair_aviso_distancia(log):
 # =========================================================================
 #                 EXECUÇÃO DO MODELO E RESULTADOS
 # =========================================================================
-def rodar_modelo(dados, time_limit, gap, log_inicial="", painel_log=None):
-    log = io.StringIO()
-    if log_inicial:
-        log.write(log_inicial.rstrip() + "\n\n")
-    atualizador = _AtualizadorPainelLog(painel_log, log) if painel_log is not None else None
-    console_stdout, console_stderr = _CONSOLE_STDOUT, _CONSOLE_STDERR
-    saida = _SaidaDuplicada(log, console_stdout, ao_escrever=atualizador)
-    erros = _SaidaDuplicada(log, console_stderr, ao_escrever=atualizador)
+def rodar_modelo(dados, time_limit, gap, log_inicial=""):
     inicio_total = time.perf_counter()
-    if atualizador is not None:
-        atualizador(forcar=True)
-    with redirect_stdout(saida), redirect_stderr(erros):
+    # Durante o solver, o log segue apenas para o console do processo. Não é
+    # mantida uma cópia crescente em memória durante execuções longas.
+    with redirect_stdout(_CONSOLE_STDOUT), redirect_stderr(_CONSOLE_STDERR):
         try:
             _registrar_evento(
                 "Iniciando modelo tático "
@@ -288,10 +258,7 @@ def rodar_modelo(dados, time_limit, gap, log_inicial="", painel_log=None):
                 _registrar_evento(f"Pico de memória antes do erro: {memoria:,.1f} MB", erro=True)
             _registrar_excecao("rodar_modelo")
             raise
-        finally:
-            if atualizador is not None:
-                atualizador(forcar=True)
-    return resultados, pl.LpStatus[status], log.getvalue()
+    return resultados, pl.LpStatus[status], ""
 
 
 def _reais(v):
@@ -668,18 +635,6 @@ def tabela_comparacao(metricas_baseline, metricas_simulacao):
 def render():
     aplicar_estilo_personalizado()
 
-    # Diagnóstico temporário sempre visível, inclusive antes de clicar em executar.
-    st.warning(f"Diagnóstico visual ativo — versão {VERSAO_LOG_CTO}")
-    st.caption(
-        "Este quadro é exibido diretamente pelo sim_cto.py e será atualizado durante a execução."
-    )
-    painel_log = st.empty()
-    painel_log.code(
-        f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
-        f"Página CTO carregada. Diagnóstico {VERSAO_LOG_CTO} pronto.",
-        language="text",
-    )
-
     if not usando_google():
         st.error(
             "A conexão com o Google ainda não foi configurada. No Streamlit Cloud, "
@@ -837,12 +792,6 @@ def render():
     gerar = st.button(texto_gerar, type="primary", width="stretch")
 
     if gerar:
-        painel_log.code(
-            f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
-            "Botão de execução acionado.\n"
-            "Iniciando leitura e preparação dos dados...",
-            language="text",
-        )
         metricas_baseline = None
         if modo_simulacao:
             metricas_baseline = st.session_state.get("cto_baseline_metricas")
@@ -866,12 +815,6 @@ def render():
         # 1) Carrega os dados.
         try:
             dados, log_dados = carregar_dados_base(solicitacoes_para_modelo)
-            painel_log.code(
-                (log_dados.rstrip() + "\n\nDados carregados. Preparando o otimizador...")
-                if log_dados
-                else "Dados carregados. Preparando o otimizador...",
-                language="text",
-            )
             progresso.update(label="Dados carregados. Resolvendo o modelo...", state="running")
         except dados_ferias_cto.ErroValidacaoDados as e:
             progresso.update(label="Dados de cadastro incompletos.", state="error")
@@ -888,15 +831,24 @@ def render():
 
         aviso_dist = extrair_aviso_distancia(log_dados)
         # 2) Resolve o modelo para o ano inteiro.
+        if not _TRAVA_SOLVER.acquire(blocking=False):
+            progresso.update(label="Já existe uma otimização em execução.", state="error")
+            st.warning(
+                "O servidor já está processando outro cenário. Aguarde a execução atual "
+                "terminar antes de iniciar uma nova."
+            )
+            return
         try:
-            with st.spinner("Resolvendo o modelo tático (pode levar alguns minutos)..."):
-                resultados, status_str, log_modelo = rodar_modelo(
-                    dados,
-                    TIME_LIMIT,
-                    GAP,
-                    log_inicial=log_dados,
-                    painel_log=painel_log,
-                )
+            try:
+                with st.spinner("Resolvendo o modelo tático (pode levar alguns minutos)..."):
+                    resultados, status_str, _ = rodar_modelo(
+                        dados,
+                        TIME_LIMIT,
+                        GAP,
+                        log_inicial=log_dados,
+                    )
+            finally:
+                _TRAVA_SOLVER.release()
             progresso.update(label=f"Modelo finalizado. Status: {status_str}", state="complete")
         except SystemExit as e:
             progresso.update(label="Modelo interrompido.", state="error")
