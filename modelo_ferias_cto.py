@@ -2,11 +2,13 @@ from __future__ import annotations
 
 """Modelo de otimização do agendador de férias do CTO."""
 
+import gc
+import hashlib
 import math
 import re
 import time
 import unicodedata
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from itertools import combinations
 from typing import Any
 
@@ -14,8 +16,44 @@ import pulp as pl
 
 
 _CACHE_COMPAT_TAREFA = {}
-_CACHE_ROTA = {}
+_CACHE_ROTA = OrderedDict()
+_CACHE_ROTA_MAX_ENTRADAS = 5_000
 _CACHE_STATS = defaultdict(int)
+
+
+class _ConjuntoAssinaturasCompactas:
+    """Set compatível que guarda somente um digest de 128 bits por assinatura."""
+
+    __slots__ = ("_digests",)
+
+    def __init__(self):
+        self._digests = set()
+
+    @staticmethod
+    def _digest(assinatura):
+        tipo, suplente, tarefas = assinatura
+        h = hashlib.blake2b(digest_size=16)
+        for item in (tipo, suplente):
+            dado = str(item).encode("utf-8")
+            h.update(len(dado).to_bytes(4, "little"))
+            h.update(dado)
+        for item in tarefas:
+            dado = str(item).encode("utf-8")
+            h.update(len(dado).to_bytes(4, "little"))
+            h.update(dado)
+        return int.from_bytes(h.digest(), "little")
+
+    def __contains__(self, assinatura):
+        return self._digest(assinatura) in self._digests
+
+    def __len__(self):
+        return len(self._digests)
+
+    def add(self, assinatura):
+        self._digests.add(self._digest(assinatura))
+
+    def discard(self, assinatura):
+        self._digests.discard(self._digest(assinatura))
 
 
 class _HiGHSComWarmStart(pl.HiGHS):
@@ -626,6 +664,7 @@ def _criar_rota(dados, tipo, suplente, tarefas_rota, tarefas):
     chave_cache = (tipo, suplente, assinatura_tarefas)
     if chave_cache in _CACHE_ROTA:
         _CACHE_STATS["rota_hit"] += 1
+        _CACHE_ROTA.move_to_end(chave_cache)
         return dict(_CACHE_ROTA[chave_cache])
     _CACHE_STATS["rota_miss"] += 1
     custo_transp, pernas = calcular_custo_transporte_rota(dados, suplente, tarefas_objs)
@@ -646,6 +685,9 @@ def _criar_rota(dados, tipo, suplente, tarefas_rota, tarefas):
         "assinatura": (tipo, suplente, ids),
     }
     _CACHE_ROTA[chave_cache] = dict(rota)
+    if len(_CACHE_ROTA) > _CACHE_ROTA_MAX_ENTRADAS:
+        _CACHE_ROTA.popitem(last=False)
+        _CACHE_STATS["rota_evicted"] += 1
     return rota
 
 
@@ -653,6 +695,21 @@ def rota_vazia(dados, suplente, tarefas):
     rota = _criar_rota(dados, "IE", suplente, (), tarefas)
     rota["rota_id"] = f"RE_{suplente}_VAZIA"
     return rota
+
+
+def _proximo_rota_id(colecao, prefixo, suplente):
+    """Gera um ID sem colisão mesmo depois que colunas forem removidas do pool."""
+    maior = 0
+    prefixo_completo = f"{prefixo}_{suplente}_"
+    for rota in colecao.get(suplente, []):
+        rota_id = str(rota.get("rota_id", ""))
+        if not rota_id.startswith(prefixo_completo):
+            continue
+        try:
+            maior = max(maior, int(rota_id.rsplit("_", 1)[-1]))
+        except (TypeError, ValueError):
+            continue
+    return f"{prefixo_completo}{maior + 1:06d}"
 
 
 def _rotas_temporais_compativeis(tarefas_seq):
@@ -673,7 +730,7 @@ def gerar_rotas_iniciais(dados, tarefas, config):
     """
     rotas_E: dict[str, list[dict[str, Any]]] = defaultdict(list)
     rotas_S: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    vistos = set()
+    vistos = _ConjuntoAssinaturasCompactas()
 
     for h in dados["I_E"]:
         r = rota_vazia(dados, h, tarefas)
@@ -685,8 +742,9 @@ def gerar_rotas_iniciais(dados, tarefas, config):
         if rota["assinatura"] in vistos:
             return
         prefixo = "RE" if tipo == "IE" else "RS"
-        rota["rota_id"] = f"{prefixo}_{suplente}_{len(rotas_E[suplente] if tipo == 'IE' else rotas_S[suplente]) + 1:06d}"
-        (rotas_E if tipo == "IE" else rotas_S)[suplente].append(rota)
+        colecao = rotas_E if tipo == "IE" else rotas_S
+        rota["rota_id"] = _proximo_rota_id(colecao, prefixo, suplente)
+        colecao[suplente].append(rota)
         vistos.add(rota["assinatura"])
 
     tarefas_lista = list(tarefas.values())
@@ -1116,6 +1174,22 @@ def resolver_mestre_lp(model, time_limit=None):
     return model.solve(pl.HiGHS(**kwargs))
 
 
+def _liberar_modelo_highs(model):
+    """Libera explicitamente a matriz nativa antes de descartar o mestre PuLP."""
+    if model is None:
+        return
+    solver_model = getattr(model, "solverModel", None)
+    if solver_model is not None:
+        try:
+            solver_model.clear()
+        except Exception:
+            pass
+        try:
+            model.solverModel = None
+        except Exception:
+            pass
+
+
 def _custo_reduzido_rota(rota, duais, duais_disponibilidade=None):
     rc = float(rota["custo_total"]) - sum(float(duais.get(j, 0.0)) for j in rota["tarefas"])
     if duais_disponibilidade:
@@ -1207,6 +1281,10 @@ def gerar_rotas_por_blocos_ativos(
             for chave, lista in compat_por_suplente.items()
         }
     inicio = time.time()
+    if max_por_bloco_override is None:
+        max_por_bloco = int(config.get("max_colunas_por_bloco_por_iteracao", 100))
+    else:
+        max_por_bloco = int(max_por_bloco_override)
 
     for idx_bloco, bloco_chave in enumerate(blocos_ativos, start=1):
         if tempo_limite_s and time.time() - inicio > tempo_limite_s:
@@ -1259,7 +1337,12 @@ def gerar_rotas_por_blocos_ativos(
                     if atual is None or (rc, rota["custo_total"]) < (atual[0], atual[1]["custo_total"]):
                         candidatos_por_balde[balde] = candidato
 
-        selecionadas_bloco = list(candidatos_por_balde.values())
+        selecionadas_bloco = sorted(
+            candidatos_por_balde.values(),
+            key=lambda item: (item[0], item[1]["custo_total"]),
+        )
+        if max_por_bloco > 0:
+            selecionadas_bloco = selecionadas_bloco[:max_por_bloco]
         diagnostico["baldes_ie"] += sum(1 for _rc, rota, _bloco in selecionadas_bloco if rota["tipo"] == "IE")
         diagnostico["baldes_is"] += sum(1 for _rc, rota, _bloco in selecionadas_bloco if rota["tipo"] == "IS")
         novas.extend(selecionadas_bloco)
@@ -1284,11 +1367,315 @@ def adicionar_rotas_ao_pool(rotas_E, rotas_S, vistos, novas):
         colecao = rotas_E if tipo == "IE" else rotas_S
         colecao.setdefault(suplente, [])
         prefixo = "RE" if tipo == "IE" else "RS"
-        rota["rota_id"] = f"{prefixo}_{suplente}_{len(colecao[suplente]) + 1:06d}"
+        rota["rota_id"] = _proximo_rota_id(colecao, prefixo, suplente)
         colecao[suplente].append(rota)
         vistos.add(rota["assinatura"])
         adicionadas += 1
     return adicionadas
+
+
+def _podar_colunas_inativas(
+    rotas_E,
+    rotas_S,
+    vistos,
+    vars_lp,
+    iteracao,
+    inatividade,
+    iteracao_entrada,
+    bloqueio_reentrada,
+    config,
+):
+    """Remove do pool rotas persistentemente zeradas no LP restrito.
+
+    A poda e reversivel: a assinatura sai de ``vistos``, portanto o pricing
+    pode gerar novamente a mesma rota se ela voltar a ter custo reduzido
+    atrativo. Rotas positivas, recentes, vazias, quase basicas pelo custo
+    reduzido e um pequeno conjunto de seguranca por tarefa sao preservados.
+    """
+    habilitada = bool(config.get("usar_poda_colunas_inativas", True))
+    tolerancia_valor = float(config.get("poda_colunas_tolerancia_valor", 1e-8))
+    tolerancia_rc = float(config.get("poda_colunas_tolerancia_custo_reduzido", 1e-7))
+    paciencia = max(1, int(config.get("poda_colunas_paciencia", 5)))
+    inicio = max(1, int(config.get("poda_colunas_inicio_iteracao", 8)))
+    intervalo = max(1, int(config.get("poda_colunas_intervalo", 3)))
+    idade_minima = max(1, int(config.get("poda_colunas_idade_minima", paciencia)))
+    min_pool = max(0, int(config.get("poda_colunas_min_pool", 1000)))
+    proteger_por_tarefa = max(
+        0, int(config.get("poda_colunas_proteger_por_tarefa", 2))
+    )
+    fracao_max = min(
+        1.0, max(0.0, float(config.get("poda_colunas_fracao_max", 0.25)))
+    )
+    cooldown = max(0, int(config.get("poda_colunas_cooldown_reentrada", 3)))
+
+    rota_info = vars_lp.get("rota_info", {})
+    assinaturas_pool = {
+        rota["assinatura"]
+        for rota in rota_info.values()
+    }
+    desbloqueadas = 0
+    for assinatura, iteracao_liberacao in list(bloqueio_reentrada.items()):
+        if iteracao < iteracao_liberacao:
+            continue
+        if assinatura not in assinaturas_pool:
+            vistos.discard(assinatura)
+        bloqueio_reentrada.pop(assinatura, None)
+        desbloqueadas += 1
+
+    custos_reduzidos = {}
+    ativas = set()
+    zeradas = set()
+
+    for nome in ("yE", "yS"):
+        for chave, var in vars_lp.get(nome, {}).items():
+            rota = rota_info.get(chave)
+            if rota is None:
+                continue
+            assinatura = rota["assinatura"]
+            iteracao_entrada.setdefault(assinatura, max(0, iteracao - 1))
+            valor = abs(float(_valor(var)))
+            dj = getattr(var, "dj", None)
+            try:
+                custos_reduzidos[assinatura] = float(dj)
+            except (TypeError, ValueError):
+                custos_reduzidos[assinatura] = float("inf")
+            if valor > tolerancia_valor:
+                inatividade[assinatura] = 0
+                ativas.add(assinatura)
+            else:
+                inatividade[assinatura] = int(inatividade.get(assinatura, 0)) + 1
+                zeradas.add(assinatura)
+
+    total_antes = len(rota_info)
+    diagnostico = {
+        "colunas_ativas_lp": len(ativas),
+        "colunas_zero_lp": len(zeradas),
+        "colunas_elegiveis_poda": 0,
+        "colunas_removidas_poda": 0,
+        "rotas_cache_removidas_poda": 0,
+        "colunas_desbloqueadas_reentrada": desbloqueadas,
+        "colunas_bloqueadas_reentrada": len(bloqueio_reentrada),
+        "colunas_pool_antes_poda": total_antes,
+        "colunas_pool_depois_poda": total_antes,
+    }
+    deve_podar = (
+        habilitada
+        and total_antes >= min_pool
+        and iteracao >= inicio
+        and (iteracao - inicio) % intervalo == 0
+        and fracao_max > 0
+    )
+    if not deve_podar:
+        return diagnostico
+
+    protegidas = set(ativas)
+    # A rota vazia dos suplentes existentes e mantida como coluna estrutural.
+    protegidas.update(
+        rota["assinatura"]
+        for rota in rota_info.values()
+        if not rota.get("tarefas")
+    )
+
+    # Preserva as rotas de menor custo para cada tarefa como rede de seguranca.
+    if proteger_por_tarefa > 0:
+        por_tarefa = defaultdict(list)
+        for rota in rota_info.values():
+            for tarefa_id in rota.get("tarefas", tuple()):
+                por_tarefa[tarefa_id].append(
+                    (float(rota.get("custo_total", 0.0)), rota["assinatura"])
+                )
+        for candidatas in por_tarefa.values():
+            candidatas.sort(key=lambda item: item[0])
+            protegidas.update(
+                assinatura
+                for _custo, assinatura in candidatas[:proteger_por_tarefa]
+            )
+
+    candidatas = []
+    for rota in rota_info.values():
+        assinatura = rota["assinatura"]
+        idade = iteracao - int(iteracao_entrada.get(assinatura, iteracao))
+        rc = custos_reduzidos.get(assinatura, float("inf"))
+        if (
+            assinatura in protegidas
+            or assinatura not in zeradas
+            or inatividade.get(assinatura, 0) < paciencia
+            or idade < idade_minima
+            or rc <= tolerancia_rc
+        ):
+            continue
+        candidatas.append(
+            (
+                -int(inatividade.get(assinatura, 0)),
+                -float(rc),
+                int(iteracao_entrada.get(assinatura, iteracao)),
+                repr(assinatura),
+                assinatura,
+            )
+        )
+
+    candidatas.sort()
+    diagnostico["colunas_elegiveis_poda"] = len(candidatas)
+    limite = min(len(candidatas), max(1, int(total_antes * fracao_max)))
+    remover = {item[-1] for item in candidatas[:limite]}
+    if not remover:
+        return diagnostico
+
+    for colecao in (rotas_E, rotas_S):
+        for suplente, rotas in list(colecao.items()):
+            mantidas = [rota for rota in rotas if rota["assinatura"] not in remover]
+            if mantidas:
+                colecao[suplente] = mantidas
+            else:
+                colecao.pop(suplente, None)
+
+    for assinatura in remover:
+        inatividade.pop(assinatura, None)
+        iteracao_entrada.pop(assinatura, None)
+        if cooldown > 0:
+            bloqueio_reentrada[assinatura] = iteracao + cooldown
+        else:
+            vistos.discard(assinatura)
+    chaves_cache_remover = [
+        chave
+        for chave, rota in _CACHE_ROTA.items()
+        if rota.get("assinatura") in remover
+    ]
+    for chave in chaves_cache_remover:
+        _CACHE_ROTA.pop(chave, None)
+
+    total_depois = sum(len(rotas) for rotas in rotas_E.values()) + sum(
+        len(rotas) for rotas in rotas_S.values()
+    )
+    diagnostico["colunas_removidas_poda"] = len(remover)
+    diagnostico["rotas_cache_removidas_poda"] = len(chaves_cache_remover)
+    diagnostico["colunas_bloqueadas_reentrada"] = len(bloqueio_reentrada)
+    diagnostico["colunas_pool_depois_poda"] = total_depois
+    print(
+        f"  Poda de colunas | iteracao={iteracao:03d} | "
+        f"ativas={len(ativas):,} | zero={len(zeradas):,} | "
+        f"elegiveis={len(candidatas):,} | removidas={len(remover):,} | "
+        f"cache_removido={len(chaves_cache_remover):,} | "
+        f"cooldown={cooldown} | "
+        f"pool={total_antes:,}->{total_depois:,}"
+    )
+    return diagnostico
+
+
+def _podar_colunas_inativas_compacta(
+    rotas_E,
+    rotas_S,
+    vistos,
+    vars_lp,
+    iteracao,
+    config,
+):
+    """Poda de baixo consumo: um contador inteiro na própria rota.
+
+    As assinaturas permanecem no conjunto ``vistos`` depois da remoção. Assim,
+    a mesma coluna não entra e sai repetidamente e não é necessário manter
+    dicionários auxiliares proporcionais ao número de colunas.
+    """
+    habilitada = bool(config.get("usar_poda_colunas_inativas", True))
+    tolerancia_valor = float(config.get("poda_colunas_tolerancia_valor", 1e-8))
+    tolerancia_rc = float(config.get("poda_colunas_tolerancia_custo_reduzido", 1e-7))
+    paciencia = max(1, int(config.get("poda_colunas_paciencia", 5)))
+    inicio = max(1, int(config.get("poda_colunas_inicio_iteracao", 8)))
+    intervalo = max(1, int(config.get("poda_colunas_intervalo", 3)))
+    min_pool = max(0, int(config.get("poda_colunas_min_pool", 1000)))
+    fracao_max = min(
+        1.0, max(0.0, float(config.get("poda_colunas_fracao_max", 0.25)))
+    )
+
+    total_antes = sum(len(rotas) for rotas in rotas_E.values()) + sum(
+        len(rotas) for rotas in rotas_S.values()
+    )
+    deve_podar = (
+        habilitada
+        and total_antes >= min_pool
+        and iteracao >= inicio
+        and (iteracao - inicio) % intervalo == 0
+        and fracao_max > 0
+    )
+    limite_remocao = int(total_antes * fracao_max) if deve_podar else 0
+    y_por_tipo = {
+        "IE": vars_lp.get("yE", {}),
+        "IS": vars_lp.get("yS", {}),
+    }
+    ativas = 0
+    zeradas = 0
+    elegiveis = 0
+    removidas = 0
+
+    for tipo, colecao in (("IE", rotas_E), ("IS", rotas_S)):
+        variaveis = y_por_tipo[tipo]
+        suplentes_vazios = []
+        for suplente, rotas in colecao.items():
+            pos = 0
+            for rota in rotas:
+                chave = (tipo, suplente, rota["rota_id"])
+                var = variaveis.get(chave)
+                valor = abs(float(_valor(var))) if var is not None else 0.0
+                if valor > tolerancia_valor:
+                    rota["_poda_zeros"] = 0
+                    ativas += 1
+                    manter = True
+                else:
+                    sequencia_zero = int(rota.get("_poda_zeros", 0)) + 1
+                    rota["_poda_zeros"] = sequencia_zero
+                    zeradas += 1
+                    dj = getattr(var, "dj", None) if var is not None else None
+                    try:
+                        custo_reduzido = float(dj)
+                    except (TypeError, ValueError):
+                        custo_reduzido = None
+                    candidata = (
+                        deve_podar
+                        and bool(rota.get("tarefas"))
+                        and sequencia_zero >= paciencia
+                        and custo_reduzido is not None
+                        and custo_reduzido > tolerancia_rc
+                    )
+                    if candidata:
+                        elegiveis += 1
+                    manter = not (
+                        candidata
+                        and removidas < limite_remocao
+                    )
+
+                if manter:
+                    rotas[pos] = rota
+                    pos += 1
+                else:
+                    # A assinatura continua em ``vistos`` para impedir churn.
+                    removidas += 1
+            if pos < len(rotas):
+                del rotas[pos:]
+            if not rotas:
+                suplentes_vazios.append(suplente)
+        for suplente in suplentes_vazios:
+            colecao.pop(suplente, None)
+
+    total_depois = total_antes - removidas
+    diagnostico = {
+        "colunas_ativas_lp": ativas,
+        "colunas_zero_lp": zeradas,
+        "colunas_elegiveis_poda": elegiveis,
+        "colunas_removidas_poda": removidas,
+        "rotas_cache_removidas_poda": 0,
+        "colunas_desbloqueadas_reentrada": 0,
+        "colunas_bloqueadas_reentrada": 0,
+        "colunas_pool_antes_poda": total_antes,
+        "colunas_pool_depois_poda": total_depois,
+    }
+    if removidas:
+        print(
+            f"  Poda de colunas | iteracao={iteracao:03d} | "
+            f"ativas={ativas:,} | zero={zeradas:,} | "
+            f"elegiveis={elegiveis:,} | removidas={removidas:,} | "
+            f"pool={total_antes:,}->{total_depois:,}"
+        )
+    return diagnostico
 
 
 def gerar_colunas_alocacao_por_baldes(
@@ -1317,7 +1704,9 @@ def gerar_colunas_alocacao_por_baldes(
     inicio = time.time()
     max_tentativas = int(config.get("max_tentativas_expansao_pricing", 5))
     fator = float(config.get("fator_expansao_pricing", 2.0))
-    max_total_iter = int(config.get("max_novas_rotas_total_por_iteracao", 1_000_000))
+    max_total_iter = max(
+        1, int(config.get("max_novas_rotas_total_por_iteracao", 10_000))
+    )
     max_blocos_base = len(blocos_ativos_base)
     coletadas = {}
     detalhes = []
@@ -1358,6 +1747,12 @@ def gerar_colunas_alocacao_por_baldes(
             if rota["assinatura"] not in coletadas or rc < coletadas[rota["assinatura"]][0]:
                 coletadas[rota["assinatura"]] = (rc, rota)
                 novas_distintas += 1
+        if len(coletadas) > 2 * max_total_iter:
+            melhores = sorted(
+                coletadas.items(),
+                key=lambda item: (item[1][0], item[1][1]["custo_total"]),
+            )[:max_total_iter]
+            coletadas = dict(melhores)
 
         detalhes.append({
             "tentativa": tentativa,
@@ -2210,7 +2605,9 @@ def gerar_colunas(
     time_limit,
 ):
     max_iter = int(config.get("max_iter_colunas", 40))
-    max_total_base = int(config.get("max_novas_rotas_total_por_iteracao", 1000000))
+    max_total_base = max(
+        1, int(config.get("max_novas_rotas_total_por_iteracao", 10_000))
+    )
     tolerancia = float(config.get("tolerancia_custo_reduzido", 1e-5))
     inicio = time.time()
     historico = []
@@ -2229,6 +2626,21 @@ def gerar_colunas(
         chave: {j["tarefa_id"] for j in lista}
         for chave, lista in compat_por_suplente.items()
     }
+    if bool(config.get("usar_poda_colunas_inativas", True)):
+        print(
+            "  Poda de colunas inativas: ativa | "
+            f"inicio={int(config.get('poda_colunas_inicio_iteracao', 8))} | "
+            f"intervalo={int(config.get('poda_colunas_intervalo', 3))} | "
+            f"paciencia={int(config.get('poda_colunas_paciencia', 5))} | "
+            f"fracao_max={float(config.get('poda_colunas_fracao_max', 0.25)):.0%} | "
+            "reinsercao=desativada"
+        )
+    print(
+        "  Limites de memoria do pricing | "
+        f"colunas_por_bloco={int(config.get('max_colunas_por_bloco_por_iteracao', 100)):,} | "
+        f"colunas_por_iteracao={max_total_base:,} | "
+        f"cache_rotas={_CACHE_ROTA_MAX_ENTRADAS:,}"
+    )
 
     def atualizar_estagio_pricing_ferias(melhoria_gap):
         nonlocal iteracoes_baixa_melhoria_modo_ferias, modo_pricing_ferias
@@ -2252,10 +2664,24 @@ def gerar_colunas(
                 acao = "parar_baixa_melhoria_baldes"
         return contador_log, acao
 
+    lp = None
+    vars_lp = None
+    z_lp = None
     for it in range(1, max_iter + 1):
         inicio_iter = time.time()
         tempos_etapa = {}
         cache_antes = _snapshot_cache_stats()
+
+        # Evita manter simultaneamente o mestre da iteracao anterior e o novo.
+        t0 = time.time()
+        _liberar_modelo_highs(lp)
+        lp = None
+        vars_lp = None
+        z_lp = None
+        cons = None
+        var = None
+        gc.collect()
+        tempos_etapa["libera_mestre_s"] = time.time() - t0
 
         t0 = time.time()
         lp, vars_lp = construir_mestre_colunas(
@@ -2275,6 +2701,14 @@ def gerar_colunas(
         config_iter = _config_por_fase(config, fase_pricing)
         max_total_iter = int(config_iter.get("max_novas_rotas_total_por_iteracao", max_total_base))
         tempo_pricing_iter = float(config_iter.get("time_limit_pricing_por_iteracao", time_limit or 30.0))
+        diag_poda = _podar_colunas_inativas_compacta(
+            rotas_E,
+            rotas_S,
+            vistos,
+            vars_lp,
+            it,
+            config_iter,
+        )
 
         duais = {}
         for tarefa_id, cons in vars_lp["cobertura_constraints"].items():
@@ -2537,6 +2971,7 @@ def gerar_colunas(
                 **diag_aloc,
                 "adicionadas": 0,
                 "colunas_totais": total_rotas,
+                **diag_poda,
                 "menor_custo_reduzido": menor_rc,
                 "ganho_marginal_coluna": ganho_marginal_coluna,
                 "baixo_ganho_marginal": iteracoes_baixo_ganho_marginal,
@@ -2545,50 +2980,12 @@ def gerar_colunas(
             }
             historico.append(hist)
             print(
-                f"  Iteracao {it:03d} | metodo={metodo} | FO LP={fo_lp:,.2f} | "
+                f"  Iteracao {it:03d} | FO={fo_lp:,.2f} | "
                 f"gap_melhoria={(melhoria_gap if melhoria_gap is not None else 0.0):.4%} | "
-                f"tempo_iter={tempo_iter:,.1f}s | tempo_total={tempo_total:,.1f}s | "
-                f"fase={fase_pricing} | "
-                f"blocos_ativos={len(blocos_ativos):,} | novos_blocos={len(novas_chaves_blocos):,} | "
-                f"blocos_filtrados={blocos_ferias_filtrados:,} | "
-                f"ferias_modo={diag_ferias['ferias_modo_pricing']} | "
-                f"baixa_ferias={baixa_melhoria_modo_ferias_log} | "
-                f"ferias_baldes={diag_ferias['ferias_baldes']:,} | "
-                f"ferias_neg={diag_ferias['ferias_negativos']:,} | "
-                f"ferias_CR={diag_ferias['ferias_menor_cr'] if diag_ferias['ferias_menor_cr'] is not None else 0.0:,.2f} | "
-                f"prog_fixas_ignoradas={diag_ferias['ferias_ignorados_programadas']:,} | "
-                f"ferias_falta_est={diag_ferias['ferias_janelas_falta_estimadas']:,} | "
-                f"ferias_sem_cob={diag_ferias['ferias_janelas_sem_cobertura']:,} | "
-                f"planos_neg={diag_ferias['ferias_planos_negativos']:,} | "
-                f"blocos_planos={diag_ferias['ferias_blocos_via_planos']:,} | "
-                f"plano_CR={diag_ferias['ferias_menor_cr_plano'] if diag_ferias['ferias_menor_cr_plano'] is not None else 0.0:,.2f} | "
-                f"mini_av={diag_ferias['ferias_mini_avaliados']:,} | "
-                f"mini_CR={diag_ferias['ferias_mini_menor_cr'] if diag_ferias['ferias_mini_menor_cr'] is not None else 0.0:,.2f} | "
-                f"mini_rotas={rotas_mini_mestre:,} | "
-                f"mini_falta={diag_ferias['ferias_mini_faltas']:,.2f} | "
-                f"novas_tarefas={len(novas_tarefas):,} | novas=0 | "
-                f"colunas_totais={total_rotas:,} | menor_CR={menor_rc:,.2f} | "
-                f"baldes={baldes_colunas:,} | negativas={colunas_negativas:,} | "
-                f"nao_negativas={colunas_nao_negativas:,} | "
-                f"compl_filtradas={colunas_complementares_filtradas:,} | "
-                f"baixa_gap={iteracoes_baixa_melhoria_global} | "
-                f"IE cand={diag_aloc['candidatas_ie']:,}/dup={diag_aloc['duplicadas_ie']:,} | "
-                f"IS cand={diag_aloc['candidatas_is']:,}/dup={diag_aloc['duplicadas_is']:,} | "
-                f"tarefas_prec={diag_aloc['tarefas_avaliadas']:,} | "
-                f"baldes_IE={diag_aloc['baldes_ie']:,} | baldes_IS={diag_aloc['baldes_is']:,} | "
-                f"sat_cob={cobertura_saturacao_acionada} | "
-                f"freio_sat={cobertura_saturacao_freada} | "
-                f"baixa_sat={iteracoes_baixa_melhoria_saturacao} | "
-                f"blocos_sat={blocos_novos_cobertura_saturacao:,} | "
-                f"cols_sat={colunas_cobertura_saturacao:,} | "
-                f"t_lp={tempos_etapa.get('lp_s', 0.0):.1f}s | "
-                f"t_ferias={tempos_etapa.get('pricing_ferias_s', 0.0):.1f}s | "
-                f"t_aloc={tempos_etapa.get('pricing_aloc_s', 0.0):.1f}s | "
-                f"t_sat={tempos_etapa.get('saturacao_s', 0.0):.1f}s | "
-                f"cache_rota={cache_delta.get('rota_hit', 0):,}/{cache_delta.get('rota_miss', 0):,} | "
-                f"cache_comp={cache_delta.get('compat_hit', 0):,}/{cache_delta.get('compat_miss', 0):,} | "
-                f"tempo_pricing_estourou={diag_aloc['parou_por_tempo']} | "
-                f"tentativas_pricing={len(detalhes_expansao):,}"
+                f"colunas={total_rotas:,} | adicionadas=0 | "
+                f"podadas={diag_poda['colunas_removidas_poda']:,} | "
+                f"menor_CR={menor_rc:,.2f} | "
+                f"tempo_iter={tempo_iter:,.1f}s | acumulado={tempo_total:,.1f}s"
             )
             if novas_chaves_blocos:
                 if cobertura_saturacao_acionada and melhoria_gap is not None and melhoria_gap < gap_min_saturacao:
@@ -2667,6 +3064,7 @@ def gerar_colunas(
             **diag_aloc,
             "adicionadas": adicionadas_reais,
             "colunas_totais": total_rotas,
+            **diag_poda,
             "menor_custo_reduzido": menor_rc,
             "ganho_marginal_coluna": ganho_marginal_coluna,
             "baixo_ganho_marginal": iteracoes_baixo_ganho_marginal,
@@ -2675,59 +3073,20 @@ def gerar_colunas(
         }
         historico.append(hist)
         print(
-            f"  Iteracao {it:03d} | metodo={metodo} | FO LP={fo_lp:,.2f} | "
+            f"  Iteracao {it:03d} | FO={fo_lp:,.2f} | "
             f"gap_melhoria={(melhoria_gap if melhoria_gap is not None else 0.0):.4%} | "
-            f"tempo_iter={tempo_iter:,.1f}s | tempo_total={tempo_total:,.1f}s | "
-            f"fase={fase_pricing} | "
-            f"blocos_ativos={len(blocos_ativos):,} | novos_blocos={len(novas_chaves_blocos):,} | "
-            f"blocos_filtrados={blocos_ferias_filtrados:,} | "
-            f"ferias_modo={diag_ferias['ferias_modo_pricing']} | "
-            f"baixa_ferias={baixa_melhoria_modo_ferias_log} | "
-            f"ferias_baldes={diag_ferias['ferias_baldes']:,} | "
-            f"ferias_neg={diag_ferias['ferias_negativos']:,} | "
-            f"ferias_CR={diag_ferias['ferias_menor_cr'] if diag_ferias['ferias_menor_cr'] is not None else 0.0:,.2f} | "
-            f"prog_fixas_ignoradas={diag_ferias['ferias_ignorados_programadas']:,} | "
-            f"ferias_falta_est={diag_ferias['ferias_janelas_falta_estimadas']:,} | "
-            f"ferias_sem_cob={diag_ferias['ferias_janelas_sem_cobertura']:,} | "
-            f"planos_neg={diag_ferias['ferias_planos_negativos']:,} | "
-            f"blocos_planos={diag_ferias['ferias_blocos_via_planos']:,} | "
-            f"plano_CR={diag_ferias['ferias_menor_cr_plano'] if diag_ferias['ferias_menor_cr_plano'] is not None else 0.0:,.2f} | "
-            f"mini_av={diag_ferias['ferias_mini_avaliados']:,} | "
-            f"mini_CR={diag_ferias['ferias_mini_menor_cr'] if diag_ferias['ferias_mini_menor_cr'] is not None else 0.0:,.2f} | "
-            f"mini_rotas={rotas_mini_mestre:,} | "
-            f"mini_falta={diag_ferias['ferias_mini_faltas']:,.2f} | "
-            f"novas_tarefas={len(novas_tarefas):,} | novas={adicionadas_reais:,} | "
-            f"colunas_totais={total_rotas:,} | menor_CR={menor_rc:,.2f} | "
-            f"ganho_col={ganho_marginal_coluna if ganho_marginal_coluna is not None else 0.0:,.4f} | "
-            f"baldes={baldes_colunas:,} | negativas={colunas_negativas:,} | "
-            f"nao_negativas={colunas_nao_negativas:,} | "
-            f"compl_filtradas={colunas_complementares_filtradas:,} | "
-            f"baixa_gap={iteracoes_baixa_melhoria_global} | "
-            f"IE cand={diag_aloc['candidatas_ie']:,}/dup={diag_aloc['duplicadas_ie']:,} | "
-            f"IS cand={diag_aloc['candidatas_is']:,}/dup={diag_aloc['duplicadas_is']:,} | "
-            f"tarefas_prec={diag_aloc['tarefas_avaliadas']:,} | "
-            f"baldes_IE={diag_aloc['baldes_ie']:,} | baldes_IS={diag_aloc['baldes_is']:,} | "
-            f"sat_cob={cobertura_saturacao_acionada} | "
-            f"freio_sat={cobertura_saturacao_freada} | "
-            f"baixa_sat={iteracoes_baixa_melhoria_saturacao} | "
-            f"blocos_sat={blocos_novos_cobertura_saturacao:,} | "
-            f"cols_sat={colunas_cobertura_saturacao:,} | "
-            f"t_lp={tempos_etapa.get('lp_s', 0.0):.1f}s | "
-            f"t_ferias={tempos_etapa.get('pricing_ferias_s', 0.0):.1f}s | "
-            f"t_aloc={tempos_etapa.get('pricing_aloc_s', 0.0):.1f}s | "
-            f"t_sat={tempos_etapa.get('saturacao_s', 0.0):.1f}s | "
-            f"cache_rota={cache_delta.get('rota_hit', 0):,}/{cache_delta.get('rota_miss', 0):,} | "
-            f"cache_comp={cache_delta.get('compat_hit', 0):,}/{cache_delta.get('compat_miss', 0):,} | "
-            f"tempo_pricing_estourou={diag_aloc['parou_por_tempo']} | "
-            f"tentativas_pricing={len(detalhes_expansao):,}"
+            f"colunas={total_rotas:,} | adicionadas={adicionadas_reais:,} | "
+            f"podadas={diag_poda['colunas_removidas_poda']:,} | "
+            f"menor_CR={menor_rc:,.2f} | "
+            f"tempo_iter={tempo_iter:,.1f}s | acumulado={tempo_total:,.1f}s"
         )
         if adicionadas_reais == 0 and not novas_chaves_blocos:
             print("  Geracao de colunas parada: candidatas encontradas ja estavam no mestre.")
             motivo_parada = "candidatas encontradas ja estavam no mestre"
             break
         limiar_ganho_col = float(config.get("limiar_ganho_marginal_coluna", 0.05))
-        paciencia_ganho_col = int(config.get("paciencia_ganho_marginal_coluna", 0))
-        min_iter_ganho_col = int(config.get("min_iter_ganho_marginal_coluna", 8))
+        paciencia_ganho_col = int(config.get("paciencia_ganho_marginal_coluna", 2))
+        min_iter_ganho_col = int(config.get("min_iter_ganho_marginal_coluna", 1))
         if ganho_marginal_coluna is not None and it >= min_iter_ganho_col:
             if ganho_marginal_coluna < limiar_ganho_col:
                 iteracoes_baixo_ganho_marginal += 1
@@ -2772,6 +3131,13 @@ def gerar_colunas(
         fo_anterior = fo_lp
     if motivo_parada is None:
         motivo_parada = f"max_iter_colunas atingido ({max_iter})"
+    _liberar_modelo_highs(lp)
+    lp = None
+    vars_lp = None
+    z_lp = None
+    cons = None
+    var = None
+    gc.collect()
     print(f"  Geracao de colunas encerrada: {motivo_parada}")
     return historico
 
@@ -2829,6 +3195,10 @@ def auditar_pricing_final(
     }
     if pl.LpStatus[status] not in ("Optimal", "Feasible"):
         print(f"  LP restrito sem solucao util na auditoria: {pl.LpStatus[status]}")
+        _liberar_modelo_highs(lp)
+        lp = None
+        vars_lp = None
+        gc.collect()
         return auditoria
 
     duais = {
@@ -2901,6 +3271,11 @@ def auditar_pricing_final(
         f"candidatas={auditoria['candidatas_cobertura_auditadas']:,} | "
         f"duplicadas={auditoria['duplicadas_cobertura_auditadas']:,}"
     )
+    _liberar_modelo_highs(lp)
+    lp = None
+    vars_lp = None
+    z_lp = None
+    gc.collect()
     return auditoria
 
 
@@ -3014,6 +3389,10 @@ def resolver_mip_final(dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas,
     warm_start = {}
     warm_start_obj = None
     fixacoes_full = {}
+    lp = None
+    vars_lp = None
+    mip_r = None
+    vars_r = None
     if bool(config.get("resolver_mip_enxuto_antes", True)):
         print("\nPreparando MIP enxuto por LP restrito")
         lp, vars_lp = construir_mestre_colunas(
@@ -3040,6 +3419,13 @@ def resolver_mip_final(dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas,
                 f"  MIP enxuto | z={len(b_info_r):,} | tarefas={len(tarefas_r):,} | "
                 f"rotas={total_rotas_r:,} | fixacoes={len(fixacoes):,}"
             )
+            # O pool reduzido e os valores do warm start já são independentes do
+            # LP. Libera o modelo nativo antes de construir o MIP enxuto para
+            # que os dois modelos grandes não coexistam na memória.
+            _liberar_modelo_highs(lp)
+            lp = None
+            vars_lp = None
+            gc.collect()
             mip_r, vars_r = construir_mestre_colunas(
                 dados, b_info_r, b_i_r, b_dia_r, tarefas_r, rE_r, rS_r,
                 relaxado=False, fixacoes=fixacoes, warm_start=valores_lp
@@ -3066,6 +3452,16 @@ def resolver_mip_final(dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas,
                     "mobiliza": vars_r["mobiliza"],
                 })
 
+    # Também cobre LP inviável/não resolvido e libera o MIP enxuto depois que
+    # seu warm start foi convertido em números escalares.
+    _liberar_modelo_highs(lp)
+    _liberar_modelo_highs(mip_r)
+    lp = None
+    vars_lp = None
+    mip_r = None
+    vars_r = None
+    gc.collect()
+
     model, variaveis_mestre = construir_mestre_colunas(
         dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas, rotas_E, rotas_S,
         relaxado=False, fixacoes=fixacoes_full, warm_start=warm_start
@@ -3081,14 +3477,21 @@ def resolver_mip_final(dados, bloco_info, blocos_por_i, blocos_por_dia, tarefas,
             print(f"  FO do warm start enxuto: {warm_start_obj:,.2f}")
     if fixacoes_full:
         print(f"  Fixacoes por confianca no MIP completo: {len(fixacoes_full):,}")
-    print("  Limite de tempo do MIP final: sem limite; corte global feito por numero de iteracoes")
+    tempo_mip_final = float(config.get("time_limit_mip_final", 600.0))
+    gap_mip_final = min(float(gap), float(config.get("gap_mip_final", 0.02)))
+    print(
+        f"  Limite de tempo do MIP final: {tempo_mip_final:,.0f}s | "
+        f"gap relativo: {gap_mip_final:.2%}"
+    )
     solver_kwargs = {
         "msg": True,
-        "gapRel": gap,
+        "gapRel": gap_mip_final,
         "threads": 1,
         "presolve": "on",
         "parallel": "off",
     }
+    if tempo_mip_final > 0:
+        solver_kwargs["timeLimit"] = tempo_mip_final
     solver_cls = _HiGHSComWarmStart if warm_start else pl.HiGHS
     status = model.solve(solver_cls(**solver_kwargs))
     if warm_start:
