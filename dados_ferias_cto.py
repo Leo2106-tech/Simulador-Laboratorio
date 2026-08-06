@@ -1099,7 +1099,6 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
     except Exception as exc:
         print(f"AVISO: nao foi possivel gerar Diagnostico_IS_Dominancia.xlsx: {exc}")
 
-    print(f"IS removidos por dominancia economica: {len(removidos_dominancia)}")
 
     pi = {}
     for i in I:
