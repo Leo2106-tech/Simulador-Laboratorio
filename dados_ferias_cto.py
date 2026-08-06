@@ -74,15 +74,38 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
                 cidades_novas.add(cf)
                 cidades_novas.add(cp)
 
-        geolocator = Nominatim(user_agent="modelo_alocacao_ferias_sem_keys")
+        geolocator = Nominatim(
+            user_agent="modelo-alocacao-ferias/1.0",
+            timeout=30,
+        )
+        
         coordenadas = {}
-        for cidade_nome in cidades_novas:
+        
+        for cidade_nome in sorted(cidades_novas):
+            nome_consulta = nomes_originais.get(cidade_nome, cidade_nome)
+        
             try:
-                local = geolocator.geocode(f"{cidade_nome}, Brasil", timeout=10)
-                coordenadas[cidade_nome] = (local.latitude, local.longitude) if local else None
-                time.sleep(1)
-            except Exception:
-                coordenadas[cidade_nome] = None
+                local = geolocator.geocode(
+                    f"{nome_consulta}, Brasil",
+                    country_codes="br",
+                    exactly_one=True,
+                    timeout=30,
+                )
+        
+                coordenadas[cidade_nome] = (
+                    (local.latitude, local.longitude)
+                    if local is not None
+                    else None
+                )
+        
+            except Exception as exc:
+                raise ErroValidacaoDados(
+                    f"Erro ao consultar a API para a cidade '{nome_consulta}': "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+        
+            finally:
+                time.sleep(1.1)
 
         cidades_nao_localizadas = sorted(
             nomes_originais.get(cidade, cidade)
