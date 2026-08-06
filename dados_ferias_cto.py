@@ -66,7 +66,7 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
         try:
             from geopy.distance import geodesic
             from geopy.geocoders import Nominatim
-            from geopy.extra.rate_limiter import RateLimiter
+            from geopy.exc import GeocoderRateLimited, GeocoderTimedOut, GeocoderUnavailable
         except ModuleNotFoundError as exc:
             raise SystemExit(
                 "Faltam pares no cache de distancias e o pacote geopy nao esta instalado. "
@@ -87,38 +87,60 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
             timeout=30,
         )
         
-        consultar_cidade = RateLimiter(
-            geolocator.geocode,
-            min_delay_seconds=2,
-            max_retries=3,
-            error_wait_seconds=10,
-            swallow_exceptions=False,
-        )
-        
         coordenadas = {}
         
         for cidade_nome in sorted(cidades_novas):
             nome_consulta = nomes_originais.get(cidade_nome, cidade_nome)
+            local = None
         
-            try:
-                local = consultar_cidade(
-                    f"{nome_consulta}, Brasil",
-                    country_codes="br",
-                    exactly_one=True,
-                )
+            for tentativa in range(4):
+                try:
+                    local = geolocator.geocode(
+                        f"{nome_consulta}, Brasil",
+                        country_codes="br",
+                        exactly_one=True,
+                        timeout=30,
+                    )
+                    break
         
-                coordenadas[cidade_nome] = (
-                    (local.latitude, local.longitude)
-                    if local is not None
-                    else None
-                )
+                except GeocoderRateLimited as exc:
+                    if tentativa == 3:
+                        raise ErroValidacaoDados(
+                            f"A API recusou as tentativas para a cidade "
+                            f"'{nome_consulta}' por limite de requisições. "
+                            f"Detalhes: {exc}"
+                        ) from exc
         
-            except Exception as exc:
-                raise ErroValidacaoDados(
-                    f"Erro ao consultar a API para a cidade "
-                    f"'{nome_consulta}': {exc}"
-                ) from exc
-
+                    espera_api = getattr(exc, "retry_after", None)
+        
+                    if not isinstance(espera_api, (int, float)):
+                        espera_api = 15 * (2 ** tentativa)
+        
+                    time.sleep(max(espera_api, 2))
+        
+                except (GeocoderTimedOut, GeocoderUnavailable) as exc:
+                    if tentativa == 3:
+                        raise ErroValidacaoDados(
+                            f"A API ficou indisponível ao consultar "
+                            f"'{nome_consulta}'. Detalhes: {exc}"
+                        ) from exc
+        
+                    time.sleep(10 * (tentativa + 1))
+        
+                except Exception as exc:
+                    raise ErroValidacaoDados(
+                        f"Erro ao consultar a API para a cidade "
+                        f"'{nome_consulta}': {exc}"
+                    ) from exc
+        
+            coordenadas[cidade_nome] = (
+                (local.latitude, local.longitude)
+                if local is not None
+                else None
+            )
+        
+            time.sleep(2)
+    
         cidades_nao_localizadas = sorted(
             nomes_originais.get(cidade, cidade)
             for cidade, coordenada in coordenadas.items()
