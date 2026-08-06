@@ -26,7 +26,14 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
     try:
         df_cache = pd.read_excel(arq_alocacao, sheet_name=aba_distancias)
         for _, row in df_cache.iterrows():
-            distancias_conhecidas[(normalizar_cidade(row["cidade_func"]), normalizar_cidade(row["cidade_proj"]))] = row["distancia_km"]
+            origem = normalizar_cidade(row["cidade_func"])
+            destino = normalizar_cidade(row["cidade_proj"])
+            distancia = float(row["distancia_km"])
+        
+            # A distância é válida nos dois sentidos.
+            distancias_conhecidas[(origem, destino)] = distancia
+            distancias_conhecidas[(destino, origem)] = distancia
+    
         print(f"Distancias carregadas da aba '{aba_distancias}': {len(distancias_conhecidas)} pares")
     except Exception as exc:
         print(f"Aviso: nao foi possivel ler a aba '{aba_distancias}' da planilha de Alocacao ({exc}).")
@@ -59,6 +66,7 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
         try:
             from geopy.distance import geodesic
             from geopy.geocoders import Nominatim
+            from geopy.extra.rate_limiter import RateLimiter
         except ModuleNotFoundError as exc:
             raise SystemExit(
                 "Faltam pares no cache de distancias e o pacote geopy nao esta instalado. "
@@ -79,17 +87,24 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
             timeout=30,
         )
         
+        consultar_cidade = RateLimiter(
+            geolocator.geocode,
+            min_delay_seconds=2,
+            max_retries=3,
+            error_wait_seconds=10,
+            swallow_exceptions=False,
+        )
+        
         coordenadas = {}
         
         for cidade_nome in sorted(cidades_novas):
             nome_consulta = nomes_originais.get(cidade_nome, cidade_nome)
         
             try:
-                local = geolocator.geocode(
+                local = consultar_cidade(
                     f"{nome_consulta}, Brasil",
                     country_codes="br",
                     exactly_one=True,
-                    timeout=30,
                 )
         
                 coordenadas[cidade_nome] = (
@@ -100,12 +115,9 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
         
             except Exception as exc:
                 raise ErroValidacaoDados(
-                    f"Erro ao consultar a API para a cidade '{nome_consulta}': "
-                    f"{type(exc)._name_}: {exc}"
+                    f"Erro ao consultar a API para a cidade "
+                    f"'{nome_consulta}': {exc}"
                 ) from exc
-        
-            finally:
-                time.sleep(1.1)
 
         cidades_nao_localizadas = sorted(
             nomes_originais.get(cidade, cidade)
