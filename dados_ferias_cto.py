@@ -116,8 +116,9 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
                 try:
                     local = geolocator.geocode(
                         f"{nome_consulta}, Brasil",
-                        countrycode="br",
+                        country="br",
                         language="pt",
+                        annotations=False,
                         exactly_one=True,
                         timeout=30,
                     )
