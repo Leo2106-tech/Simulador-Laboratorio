@@ -6,6 +6,7 @@ import unicodedata
 from pathlib import Path
 
 import pandas as pd
+import streamlit as st
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -65,8 +66,14 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
     if pares_faltando:
         try:
             from geopy.distance import geodesic
-            from geopy.geocoders import Nominatim
-            from geopy.exc import GeocoderRateLimited, GeocoderTimedOut, GeocoderUnavailable
+            from geopy.geocoders import OpenCage
+            from geopy.exc import (
+                GeocoderRateLimited,
+                GeocoderQuotaExceeded,
+                GeocoderTimedOut,
+                GeocoderUnavailable,
+                GeocoderServiceError,
+            )
         except ModuleNotFoundError as exc:
             raise SystemExit(
                 "Faltam pares no cache de distancias e o pacote geopy nao esta instalado. "
@@ -82,8 +89,20 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
                 cidades_novas.add(cf)
                 cidades_novas.add(cp)
 
-        geolocator = Nominatim(
-            user_agent="modelo-alocacao-ferias/1.0",
+        try:
+            api_key = st.secrets["opencage"]["api_key"]
+        except (KeyError, FileNotFoundError) as exc:
+            raise ErroValidacaoDados(
+                "A chave da OpenCage não foi encontrada nos secrets."
+            ) from exc
+        
+        if not str(api_key).strip():
+            raise ErroValidacaoDados(
+                "A chave da OpenCage está vazia nos secrets."
+            )
+        
+        geolocator = OpenCage(
+            api_key=api_key,
             timeout=30,
         )
         
@@ -93,43 +112,48 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
             nome_consulta = nomes_originais.get(cidade_nome, cidade_nome)
             local = None
         
-            for tentativa in range(4):
+            for tentativa in range(3):
                 try:
                     local = geolocator.geocode(
                         f"{nome_consulta}, Brasil",
-                        country_codes="br",
+                        countrycode="br",
+                        language="pt",
                         exactly_one=True,
                         timeout=30,
                     )
                     break
         
                 except GeocoderRateLimited as exc:
-                    if tentativa == 3:
+                    if tentativa == 2:
                         raise ErroValidacaoDados(
-                            f"A API recusou as tentativas para a cidade "
-                            f"'{nome_consulta}' por limite de requisições. "
-                            f"Detalhes: {exc}"
+                            f"A OpenCage recebeu consultas muito rapidamente "
+                            f"ao localizar '{nome_consulta}'."
                         ) from exc
         
-                    espera_api = getattr(exc, "retry_after", None)
+                    espera = getattr(exc, "retry_after", None)
         
-                    if not isinstance(espera_api, (int, float)):
-                        espera_api = 15 * (2 ** tentativa)
+                    if not isinstance(espera, (int, float)):
+                        espera = 2
         
-                    time.sleep(max(espera_api, 2))
+                    time.sleep(max(espera, 2))
+        
+                except GeocoderQuotaExceeded as exc:
+                    raise ErroValidacaoDados(
+                        "A cota diária da OpenCage foi atingida."
+                    ) from exc
         
                 except (GeocoderTimedOut, GeocoderUnavailable) as exc:
-                    if tentativa == 3:
+                    if tentativa == 2:
                         raise ErroValidacaoDados(
-                            f"A API ficou indisponível ao consultar "
-                            f"'{nome_consulta}'. Detalhes: {exc}"
+                            f"A OpenCage ficou indisponível ao consultar "
+                            f"'{nome_consulta}': {exc}"
                         ) from exc
         
-                    time.sleep(10 * (tentativa + 1))
+                    time.sleep(5)
         
-                except Exception as exc:
+                except GeocoderServiceError as exc:
                     raise ErroValidacaoDados(
-                        f"Erro ao consultar a API para a cidade "
+                        f"A OpenCage recusou a consulta de "
                         f"'{nome_consulta}': {exc}"
                     ) from exc
         
@@ -139,7 +163,8 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
                 else None
             )
         
-            time.sleep(2)
+            # O teste gratuito permite uma consulta por segundo.
+            time.sleep(1.1)
     
         cidades_nao_localizadas = sorted(
             nomes_originais.get(cidade, cidade)
