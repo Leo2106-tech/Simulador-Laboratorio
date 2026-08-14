@@ -536,13 +536,20 @@ def _turno_permitido(dados, suplente, turno_tarefa):
 
 
 def _tarefa_compativel(dados, suplente, tarefa, tipo):
+    projeto = tarefa.get("projeto")
+    inicio_tarefa = tarefa.get("ini")
+    data_inicio_tarefa = dados.get("t_para_data", {}).get(inicio_tarefa)
+    data_liberacao_mobilizacao = dados.get("data_liberacao_mobilizacao")
     chave = (
         tipo,
         suplente,
         tarefa.get("tarefa_id"),
         tarefa.get("colaborador_ferias"),
+        projeto,
+        inicio_tarefa,
         tarefa.get("cargo"),
         tarefa.get("turno"),
+        data_liberacao_mobilizacao,
     )
     if chave in _CACHE_COMPAT_TAREFA:
         _CACHE_STATS["compat_hit"] += 1
@@ -553,6 +560,15 @@ def _tarefa_compativel(dados, suplente, tarefa, tipo):
     elif dados["a"].get((dados["cargo"][suplente], tarefa["cargo"]), 0) != 1:
         resultado = False
     elif not _turno_permitido(dados, suplente, tarefa["turno"]):
+        resultado = False
+    elif (
+        int(dados.get("mobilizado", {}).get((suplente, projeto), 0)) == 0
+        and data_inicio_tarefa is not None
+        and data_liberacao_mobilizacao is not None
+        and data_inicio_tarefa < data_liberacao_mobilizacao
+    ):
+        # Nao gera nenhuma coluna que coloque uma pessoa ainda nao mobilizada
+        # no projeto antes de completar os 30 dias de antecedencia.
         resultado = False
     else:
         resultado = True

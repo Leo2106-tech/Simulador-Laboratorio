@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 import unicodedata
 from pathlib import Path
@@ -10,7 +11,15 @@ import streamlit as st
 
 
 BASE_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = BASE_DIR
+# No modo local, o iniciador informa onde estao as planilhas. Mantemos a pasta
+# do programa como fallback para preservar a compatibilidade com o deploy atual.
+PROJECT_DIR = Path(os.environ.get("CTO_PLANILHAS_DIR", BASE_DIR)).expanduser().resolve()
+
+
+def caminho_planilha(nome_variavel, nome_padrao):
+    """Retorna o arquivo escolhido localmente ou o arquivo padrao do deploy."""
+    caminho_local = os.environ.get(nome_variavel)
+    return Path(caminho_local).expanduser().resolve() if caminho_local else PROJECT_DIR / nome_padrao
 
 class ErroValidacaoDados(ValueError):
     """Erro de cadastro que deve ser exibido ao usuario antes de rodar o modelo."""
@@ -21,7 +30,7 @@ def calcular_matriz_distancias(cidades_funcionarios, cidades_projetos, aba_dista
     Calcula distancias entre cidades usando a aba "Distancias" da planilha de Alocacao.
     So consulta o OpenStreetMap para pares ausentes na aba.
     """
-    arq_alocacao = PROJECT_DIR / "Alocação Atualizada.xlsx"
+    arq_alocacao = caminho_planilha("CTO_ARQ_ALOCACAO", "Alocação Atualizada.xlsx")
 
     distancias_conhecidas = {}
     try:
@@ -259,8 +268,8 @@ def normalizar_matricula(valor):
 
 def carregar_solicitacoes_ferias_pendentes():
     """Carrega solicitacoes ainda nao aprovadas para selecao no Streamlit."""
-    arq_ferias = PROJECT_DIR / "Controle de Férias LAB_CTO.xlsx"
-    arq_alocacao = PROJECT_DIR / "Alocação Atualizada.xlsx"
+    arq_ferias = caminho_planilha("CTO_ARQ_FERIAS", "Controle de Férias LAB_CTO.xlsx")
+    arq_alocacao = caminho_planilha("CTO_ARQ_ALOCACAO", "Alocação Atualizada.xlsx")
     df = selecionar_colunas_por_cabecalho(
         pd.read_excel(arq_ferias, sheet_name="Respostas ao formulário"),
         {
@@ -277,14 +286,26 @@ def carregar_solicitacoes_ferias_pendentes():
         {
             "matricula": ["Matrícula", "Matricula"],
             "cargo": ["Cargo atualizado", "Cargo"],
+            "projeto": ["Projeto"],
         },
         "Alocação",
     )
+    df_projetos = selecionar_colunas_por_cabecalho(
+        pd.read_excel(arq_alocacao, sheet_name="Localidade"),
+        {"projeto": ["Projeto"]},
+        "Localidade",
+    )
     df_cargos["matricula"] = df_cargos["matricula"].apply(normalizar_matricula)
     df_cargos["cargo_norm"] = df_cargos["cargo"].map(normalizar_cargo_detalhado)
-    matriculas_cargos_validos = set(
+    df_cargos["projeto"] = df_cargos["projeto"].fillna("").astype(str).str.strip()
+    projetos_considerados = set(
+        df_projetos["projeto"].dropna().astype(str).str.strip()
+    )
+    projetos_considerados.discard("")
+    matriculas_modelo_validas = set(
         df_cargos.loc[
-            df_cargos["cargo_norm"].isin(CARGOS_DETALHADOS_VALIDOS),
+            df_cargos["cargo_norm"].isin(CARGOS_DETALHADOS_VALIDOS)
+            & df_cargos["projeto"].isin(projetos_considerados),
             "matricula",
         ]
     )
@@ -333,8 +354,10 @@ def carregar_solicitacoes_ferias_pendentes():
 
     pendentes = pendentes.drop(index=invalidas.index)
 
-    # A lista da simulacao mostra apenas pedidos futuros e dos mesmos cargos
-    # considerados pelo modelo. Exclusoes por estes filtros sao silenciosas.
+    # A lista da simulacao mostra apenas pedidos futuros, dos cargos aceitos e
+    # de colaboradores alocados em projetos presentes na aba Localidade, que e
+    # a mesma regra usada pelo modelo para definir os projetos considerados.
+    # Exclusoes por estes filtros sao silenciosas.
     hoje = (
         pd.Timestamp.now(tz="America/Sao_Paulo")
         .normalize()
@@ -342,7 +365,7 @@ def carregar_solicitacoes_ferias_pendentes():
     )
     pendentes = pendentes[
         (pendentes["inicio"] >= hoje)
-        & pendentes["matricula"].isin(matriculas_cargos_validos)
+        & pendentes["matricula"].isin(matriculas_modelo_validas)
     ].copy()
 
     duplicadas = pendentes.duplicated(
@@ -519,15 +542,26 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
     Le as planilhas de entrada e monta os conjuntos/parametros da formulacao.
     Nesta release os conjuntos seguem o texto: I_A, I_E, I_S e I.
     """
-    arq_alocacao = PROJECT_DIR / "Alocação Atualizada.xlsx"
-    arq_ferias = PROJECT_DIR / "Controle de Férias LAB_CTO.xlsx"
-    arq_flexibilidade = PROJECT_DIR / "Flexibilidade Operacional CTO.xlsx"
+    arq_alocacao = caminho_planilha("CTO_ARQ_ALOCACAO", "Alocação Atualizada.xlsx")
+    arq_ferias = caminho_planilha("CTO_ARQ_FERIAS", "Controle de Férias LAB_CTO.xlsx")
+    arq_flexibilidade = caminho_planilha("CTO_ARQ_FLEXIBILIDADE", "Flexibilidade Operacional CTO.xlsx")
 
-    # Para voltar ao horizonte movel do dia corrente, use:
-    # data_inicio = pd.Timestamp.now(tz="America/Sao_Paulo").normalize().tz_localize(None)
-    data_inicio = pd.Timestamp("2026-07-16")
+    # Horizonte movel de 365 dias, iniciado na data local de cada execucao.
+    data_execucao = (
+        pd.Timestamp.now(tz="America/Sao_Paulo")
+        .normalize()
+        .tz_localize(None)
+    )
+    data_inicio = data_execucao
     data_fim = data_inicio + pd.Timedelta(days=364)
     datas = pd.date_range(data_inicio, data_fim, freq="D")
+
+    # Uma pessoa ainda nao mobilizada para um projeto precisa cumprir 30 dias
+    # corridos de antecedencia a partir da data em que a simulacao e executada.
+    prazo_mobilizacao_dias = 30
+    data_liberacao_mobilizacao = data_execucao + pd.Timedelta(
+        days=prazo_mobilizacao_dias
+    )
 
     T = list(range(1, len(datas) + 1))
     data_para_t = {data.normalize(): idx + 1 for idx, data in enumerate(datas)}
@@ -1154,6 +1188,9 @@ def carregar_dados(solicitacoes_aprovadas_teste=None):
         "pi": pi,
         "mobilizado": mobilizado,
         "Cmob": Cmob,
+        "data_execucao": data_execucao,
+        "prazo_mobilizacao_dias": prazo_mobilizacao_dias,
+        "data_liberacao_mobilizacao": data_liberacao_mobilizacao,
         "cidade_projeto": cidade_projeto,
         "inicio_projeto": inicio_projeto,
         "fim_projeto": fim_projeto,

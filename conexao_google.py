@@ -16,6 +16,7 @@ import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -325,6 +326,7 @@ def _formatar_aba(session, planilha_id, propriedades, df):
         "Adicional noturno", "Transporte por mudança", "Custo total",
         "Receita não gerada", "Custo de transporte", "Custo de mobilização",
         "Custo total da rota",
+        "Custo da mobilização",
     }
     for indice, coluna in enumerate(df.columns):
         if str(coluna) in cabecalhos_monetarios:
@@ -394,6 +396,50 @@ def _formatar_aba(session, planilha_id, propriedades, df):
     _batch_update(session, planilha_id, requests, "formatar resultados")
 
 
+def _registrar_atualizacao_resumo(session, planilha_id, propriedades):
+    """Registra em E1:F1 quando a aba Resumo foi atualizada."""
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
+    intervalo = quote("'Resumo'!E1:F1", safe="")
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{planilha_id}"
+        f"/values/{intervalo}"
+    )
+    resp = session.put(
+        url,
+        params={"valueInputOption": "USER_ENTERED"},
+        json={
+            "majorDimension": "ROWS",
+            "values": [["Última atualização", agora]],
+        },
+    )
+    _verificar_resposta(resp, planilha_id, "registrar ultima atualizacao")
+
+    _batch_update(
+        session,
+        planilha_id,
+        [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": propriedades["sheetId"],
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 4,
+                    "endColumnIndex": 6,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                    }
+                },
+                "fields": "userEnteredFormat.textFormat.bold",
+            }
+        }],
+        "formatar ultima atualizacao",
+    )
+
+
 def salvar_abas_resultados(abas):
     """Substitui o conteudo das abas informadas na planilha Resultados."""
     planilha_id = _id_planilha("resultados")
@@ -408,11 +454,13 @@ def salvar_abas_resultados(abas):
             planilha_id,
             nome_aba,
             max(2, len(valores)),
-            max(1, len(df.columns)),
+            max(6 if nome_aba == "Resumo" else 1, len(df.columns)),
             metadados,
         )
         _gravar_valores(session, planilha_id, nome_aba, valores)
         _formatar_aba(session, planilha_id, propriedades, df)
+        if nome_aba == "Resumo":
+            _registrar_atualizacao_resumo(session, planilha_id, propriedades)
 
 
 def ler_aba_resultados(nome_aba):

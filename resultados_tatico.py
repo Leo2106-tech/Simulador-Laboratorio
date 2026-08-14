@@ -282,6 +282,32 @@ def extrair_resultados_tatico(dados, model, status, variaveis):
     Cmob = float(dados.get("Cmob", 600.0))
     mobilizacoes_acionadas = [ch for ch, var in mobiliza.items() if _valor(var) > 0.5]
     custo_mobilizacao = Cmob * len(mobilizacoes_acionadas)
+    prazo_mobilizacao_dias = int(dados.get("prazo_mobilizacao_dias", 30))
+    data_execucao = dados.get("data_execucao")
+    data_liberacao = dados.get("data_liberacao_mobilizacao")
+    linhas_mobilizacoes = []
+    for matricula, projeto in sorted(
+        mobilizacoes_acionadas,
+        key=lambda chave: (str(chave[1]), str(chave[0])),
+    ):
+        nome = nome_por_matricula.get(matricula, "")
+        if not nome and matricula in I_S:
+            nome = f"Suplente potencial ({matricula})"
+        linhas_mobilizacoes.append({
+            "nome": nome,
+            "matricula": matricula,
+            "projeto": projeto,
+            "custo_mobilizacao": Cmob,
+            "tempo_estimado_dias": prazo_mobilizacao_dias,
+            "data_inicio_mobilizacao": (
+                data_execucao.strftime("%d/%m/%Y")
+                if data_execucao is not None else ""
+            ),
+            "data_estimada_liberacao": (
+                data_liberacao.strftime("%d/%m/%Y")
+                if data_liberacao is not None else ""
+            ),
+        })
     receita_gerada_total = receita_potencial - receita_perdida
     lucro_calculado = (
         receita_gerada_total
@@ -452,6 +478,14 @@ def extrair_resultados_tatico(dados, model, status, variaveis):
         "ferias": pd.DataFrame(linhas_ferias, columns=cols_ferias),
         "faltas": pd.DataFrame(linhas_faltas),
         "alocacoes": pd.DataFrame(linhas_alocacoes),
+        "mobilizacoes": pd.DataFrame(
+            linhas_mobilizacoes,
+            columns=[
+                "nome", "matricula", "projeto", "custo_mobilizacao",
+                "tempo_estimado_dias", "data_inicio_mobilizacao",
+                "data_estimada_liberacao",
+            ],
+        ),
         "transporte": pd.DataFrame(linhas_transporte),
         "lucro_calculado": lucro_calculado,
         "custo_total_valor": fo_valor,
@@ -480,5 +514,6 @@ def imprimir_resultados_terminal_tatico(dados, model, status, variaveis, gerar_e
             resultados["ferias"].to_excel(writer, sheet_name="Ferias", index=False)
             resultados["faltas"].to_excel(writer, sheet_name="Faltas", index=False)
             resultados["alocacoes"].to_excel(writer, sheet_name="Alocacoes", index=False)
+            resultados["mobilizacoes"].to_excel(writer, sheet_name="Mobilizacoes", index=False)
             resultados["transporte"].to_excel(writer, sheet_name="Transporte", index=False)
         print(f"\nArquivo gerado: {caminho.resolve()}")

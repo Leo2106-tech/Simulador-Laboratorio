@@ -151,8 +151,13 @@ def limpar_cache():
 # =========================================================================
 #                 CARGA DE DADOS DO MODELO (CACHEADA)
 # =========================================================================
+def chave_data_local():
+    """Mantem o cache apenas durante o mesmo dia no fuso de Sao Paulo."""
+    return pd.Timestamp.now(tz="America/Sao_Paulo").strftime("%Y-%m-%d")
+
+
 @st.cache_data(show_spinner=False, max_entries=1)
-def carregar_solicitacoes_pendentes_base():
+def carregar_solicitacoes_pendentes_base(data_execucao_cache=None):
     """Carrega as opcoes exibidas no seletor de solicitacoes pendentes."""
     if usando_google():
         from conexao_google import baixar_planilhas
@@ -161,7 +166,7 @@ def carregar_solicitacoes_pendentes_base():
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
-def carregar_dados_base(solicitacoes_aprovadas_teste=()):
+def carregar_dados_base(solicitacoes_aprovadas_teste=(), data_execucao_cache=None):
     """Carrega os dados do modelo.
 
     Nuvem: exporta as planilhas para uma pasta temporaria do servidor Streamlit.
@@ -296,6 +301,13 @@ RENOMES = {
         "data_inicio": "Data inicial", "data_fim": "Data final",
         "turno": "Turno", "quantidade_dias": "Quantidade de dias",
     },
+    "mobilizacoes": {
+        "nome": "Nome", "matricula": "Matrícula", "projeto": "Projeto",
+        "custo_mobilizacao": "Custo da mobilização",
+        "tempo_estimado_dias": "Tempo estimado (dias)",
+        "data_inicio_mobilizacao": "Início da mobilização",
+        "data_estimada_liberacao": "Liberação estimada",
+    },
     "transporte": {
         "tipo": "Tipo", "suplente": "Matrícula", "rota_id": "Rota",
         "origem": "Origem", "sequencia_projetos": "Sequência de projetos",
@@ -322,6 +334,7 @@ COLUNAS_MONETARIAS = {
     },
     "contratacoes": {"custo_total"},
     "faltas": {"receita_nao_gerada"},
+    "mobilizacoes": {"custo_mobilizacao"},
     "transporte": {
         "custo_transporte", "custo_mobilizacao", "custo_noturno", "custo_total_rota",
     },
@@ -448,6 +461,7 @@ def montar_excel_resultados(resultados):
     abas = [
         ("Resumo", "resumo"), ("Demanda", "demanda"), ("Contratacoes", "contratacoes"),
         ("Ferias", "ferias"), ("Faltas", "faltas"), ("Alocacoes", "alocacoes"),
+        ("Mobilizacoes", "mobilizacoes"),
         ("Transporte", "transporte"),
     ]
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -465,6 +479,7 @@ def montar_abas_google(resultados, modo="baseline", comparacao=None):
         ("Resumo", "resumo"), ("Demanda", "demanda"),
         ("Contratacoes", "contratacoes"), ("Ferias", "ferias"),
         ("Faltas", "faltas"), ("Alocacoes", "alocacoes"),
+        ("Mobilizacoes", "mobilizacoes"),
         ("Transporte", "transporte"),
     ]
     prefixo = "" if modo == "baseline" else "Simulacao_"
@@ -490,7 +505,9 @@ def salvar_baseline_local(conteudo_xlsx):
 
 
 def salvar_resultados_persistentes(resultados, modo, comparacao=None, conteudo_xlsx=None):
-    """Salva na planilha Google; mantem fallback local apenas para desenvolvimento."""
+    """Persiste somente o baseline; simulacoes ficam disponiveis apenas para download."""
+    if modo != "baseline":
+        return None
     if usando_google():
         from conexao_google import salvar_abas_resultados
 
@@ -734,7 +751,9 @@ def render():
 
     if modo_simulacao:
         try:
-            carga_solicitacoes = carregar_solicitacoes_pendentes_base()
+            carga_solicitacoes = carregar_solicitacoes_pendentes_base(
+                chave_data_local()
+            )
         except dados_ferias_cto.ErroValidacaoDados as e:
             st.error(str(e))
             return
@@ -755,7 +774,8 @@ def render():
 
         st.caption(
             "Exibindo somente solicitações futuras de férias dos cargos considerados "
-            "pelo modelo: auxiliar, laboratorista e técnico."
+            "pelo modelo — auxiliar, laboratorista e técnico — e de colaboradores "
+            "alocados nos projetos considerados na aba Localidade."
         )
 
         def limpar_plano_ao_mudar_cenario():
@@ -814,7 +834,10 @@ def render():
 
         # 1) Carrega os dados.
         try:
-            dados, log_dados = carregar_dados_base(solicitacoes_para_modelo)
+            dados, log_dados = carregar_dados_base(
+                solicitacoes_para_modelo,
+                chave_data_local(),
+            )
             progresso.update(label="Dados carregados. Resolvendo o modelo...", state="running")
         except dados_ferias_cto.ErroValidacaoDados as e:
             progresso.update(label="Dados de cadastro incompletos.", state="error")
@@ -867,15 +890,6 @@ def render():
         solucao_valida = status_str in ("Optimal", "Feasible")
         if modo_simulacao and solucao_valida:
             comparacao_baseline = tabela_comparacao(metricas_baseline, metricas_plano)
-            try:
-                destino_resultado = salvar_resultados_persistentes(
-                    resultados,
-                    modo="simulacao",
-                    comparacao=comparacao_baseline,
-                    conteudo_xlsx=xlsx_plano,
-                )
-            except Exception as e:
-                erro_salvar_resultado = str(e)
         elif not modo_simulacao and solucao_valida:
             st.session_state["cto_baseline_metricas"] = metricas_plano
             try:
@@ -955,13 +969,10 @@ def render():
             st.success(f"Baseline salvo em {plano.get('destino_resultado') or NOME_BASELINE_LOCAL}.")
 
     if plano_simulacao:
-        if plano.get("erro_salvar_resultado"):
-            st.warning(
-                "A simulação foi calculada, mas não foi possível salvá-la na planilha de resultados: "
-                + plano["erro_salvar_resultado"]
-            )
-        elif plano.get("destino_resultado"):
-            st.success("Simulação e comparação salvas na Planilha Google Resultados.")
+        st.info(
+            "Esta simulação não é salva na planilha Google. "
+            "Use o botão de download ao final da página para obter o arquivo Excel."
+        )
 
     if plano.get("aviso_dist"):
         st.warning(
@@ -1000,8 +1011,11 @@ def render():
 
     # --- Tabelas ---
     r = plano["resultados"]
-    t_resumo, t_ferias, t_contr, t_faltas, t_aloc, t_transp = st.tabs(
-        ["Resumo", "Férias", "Contratações", "Faltas", "Alocações", "Transporte"]
+    t_resumo, t_ferias, t_contr, t_faltas, t_aloc, t_mob, t_transp = st.tabs(
+        [
+            "Resumo", "Férias", "Contratações", "Faltas", "Alocações",
+            "Mobilizações", "Transporte",
+        ]
     )
     with t_resumo:
         st.dataframe(_mostrar_streamlit(r["resumo"], "resumo"), width="stretch", hide_index=True)
@@ -1050,6 +1064,16 @@ def render():
 
             with st.expander("Ver alocações detalhadas (dia a dia)"):
                 st.dataframe(_mostrar_streamlit(df, "alocacoes"), width="stretch", hide_index=True)
+    with t_mob:
+        df = r["mobilizacoes"]
+        if df.empty:
+            st.info("Nenhuma nova mobilização necessária.")
+        else:
+            st.dataframe(
+                _mostrar_streamlit(df, "mobilizacoes"),
+                width="stretch",
+                hide_index=True,
+            )
     with t_transp:
         df = r["transporte"]
         st.dataframe(_mostrar_streamlit(df, "transporte"), width="stretch", hide_index=True) if not df.empty else st.info("Sem custo de transporte por mudança.")
