@@ -13,6 +13,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 # ============================================================
 # TABELA DE CUSTOS MÉDIOS
@@ -894,6 +896,144 @@ def analisar_cenario_manual(
         "ensaios": ensaios_calculados,
     }
 
+def preparar_tabela_resultados(cenario, tabela_precos_global):
+    """Monta a mesma tabela de precos usada na tela e na exportacao."""
+    df_resultados = pd.DataFrame(cenario.get("ensaios", []))
+
+    if df_resultados.empty:
+        return df_resultados
+
+    df_resultados = df_resultados.rename(columns={
+        "Sigla": "Ensaio",
+        "Quantidade": "Qtd",
+        "Prazo": "Prazo",
+        "Preco_Unitario": "Preço Otimizado (R$)",
+        "Custo_Unitario": "Custo Unitário (R$)",
+        "Receita_Bruta_Item": "Valor Total (R$)",
+    })
+
+    valores_padrao = {
+        "Ensaio": "-",
+        "Qtd": 0,
+        "Prazo": "-",
+        "Preço Otimizado (R$)": 0.0,
+        "Custo Unitário (R$)": 0.0,
+    }
+    for coluna, valor in valores_padrao.items():
+        if coluna not in df_resultados.columns:
+            df_resultados[coluna] = valor
+
+    if "Valor Total (R$)" not in df_resultados.columns:
+        df_resultados["Valor Total (R$)"] = (
+            pd.to_numeric(df_resultados["Qtd"], errors="coerce").fillna(0)
+            * pd.to_numeric(
+                df_resultados["Preço Otimizado (R$)"],
+                errors="coerce",
+            ).fillna(0)
+        )
+
+    df_resultados["Preço Base (R$)"] = df_resultados["Ensaio"].apply(
+        lambda ensaio: tabela_precos_global.get(ensaio, 0.0)
+    )
+    df_resultados["Qtd"] = (
+        pd.to_numeric(df_resultados["Qtd"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
+    colunas_monetarias = [
+        "Preço Base (R$)",
+        "Custo Unitário (R$)",
+        "Preço Otimizado (R$)",
+        "Valor Total (R$)",
+    ]
+    for coluna in colunas_monetarias:
+        df_resultados[coluna] = pd.to_numeric(
+            df_resultados[coluna],
+            errors="coerce",
+        ).fillna(0)
+
+    def formatar_variacao(linha):
+        otimizado = linha["Preço Otimizado (R$)"]
+        base = linha["Preço Base (R$)"]
+        if base <= 0:
+            return "➖"
+
+        variacao = round(((otimizado / base) - 1) * 100, 2)
+        if variacao > 0:
+            return f"🔺 +{variacao:.1f}%"
+        if variacao < 0:
+            return f"🔻 {variacao:.1f}%"
+        return "➖ 0.0%"
+
+    df_resultados["Variação Aplicada"] = df_resultados.apply(
+        formatar_variacao,
+        axis=1,
+    )
+
+    return df_resultados[[
+        "Ensaio",
+        "Qtd",
+        "Prazo",
+        "Preço Base (R$)",
+        "Custo Unitário (R$)",
+        "Preço Otimizado (R$)",
+        "Variação Aplicada",
+        "Valor Total (R$)",
+    ]]
+
+
+def gerar_excel_cenarios(cenarios, tabela_precos_global):
+    """Gera um unico XLSX com uma aba para cada cenario disponivel."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for nome_aba, cenario in cenarios:
+            tabela = preparar_tabela_resultados(cenario, tabela_precos_global).copy()
+            tabela["Custo Unitário (R$)"] = -tabela["Custo Unitário (R$)"].abs()
+            tabela.to_excel(writer, sheet_name=nome_aba, index=False)
+
+        preenchimento = PatternFill("solid", fgColor="054D8B")
+        fonte = Font(color="FFFFFF", bold=True)
+        colunas_monetarias = {
+            "Preço Base (R$)",
+            "Custo Unitário (R$)",
+            "Preço Otimizado (R$)",
+            "Valor Total (R$)",
+        }
+
+        for planilha in writer.book.worksheets:
+            planilha.freeze_panes = "A2"
+            planilha.auto_filter.ref = planilha.dimensions
+            planilha.row_dimensions[1].height = 24
+
+            for celula in planilha[1]:
+                celula.fill = preenchimento
+                celula.font = fonte
+                celula.alignment = Alignment(horizontal="center", vertical="center")
+
+            for celula_cabecalho in planilha[1]:
+                if celula_cabecalho.value not in colunas_monetarias:
+                    continue
+                for linha in range(2, planilha.max_row + 1):
+                    planilha.cell(
+                        row=linha,
+                        column=celula_cabecalho.column,
+                    ).number_format = 'R$ #,##0.00;[Red]-R$ #,##0.00'
+
+            for indice, coluna in enumerate(planilha.columns, start=1):
+                maior_conteudo = max(
+                    len(str(celula.value)) if celula.value is not None else 0
+                    for celula in coluna
+                )
+                planilha.column_dimensions[get_column_letter(indice)].width = min(
+                    max(maior_conteudo + 2, 12),
+                    42,
+                )
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 # =========================================================================
 # CALLBACKS DA UI
 # =========================================================================
@@ -1308,91 +1448,14 @@ def render():
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("##### 🛒 Tabela de Preços Sugeridos por Ensaio")
 
-            df_resultados = pd.DataFrame(cenario.get("ensaios", []))
+            df_resultados = preparar_tabela_resultados(
+                cenario,
+                tabela_precos_global,
+            )
 
             if df_resultados.empty:
                 st.info("Nenhum ensaio encontrado neste cenário.")
                 return
-
-            df_resultados = df_resultados.rename(columns={
-                "Sigla": "Ensaio",
-                "Quantidade": "Qtd",
-                "Prazo": "Prazo",
-                "Preco_Unitario": "Preço Otimizado (R$)",
-                "Custo_Unitario": "Custo Unitário (R$)",
-                "Receita_Bruta_Item": "Valor Total (R$)",
-            })
-
-            if "Ensaio" not in df_resultados.columns:
-                df_resultados["Ensaio"] = "-"
-            if "Qtd" not in df_resultados.columns:
-                df_resultados["Qtd"] = 0
-            if "Prazo" not in df_resultados.columns:
-                df_resultados["Prazo"] = "-"
-            if "Preço Otimizado (R$)" not in df_resultados.columns:
-                df_resultados["Preço Otimizado (R$)"] = 0.0
-            if "Custo Unitário (R$)" not in df_resultados.columns:
-                df_resultados["Custo Unitário (R$)"] = 0.0
-            if "Valor Total (R$)" not in df_resultados.columns:
-                df_resultados["Valor Total (R$)"] = (
-                    pd.to_numeric(df_resultados["Qtd"], errors="coerce").fillna(0)
-                    *
-                    pd.to_numeric(df_resultados["Preço Otimizado (R$)"], errors="coerce").fillna(0)
-                )
-
-            df_resultados["Preço Base (R$)"] = df_resultados["Ensaio"].apply(
-                lambda x: tabela_precos_global.get(x, 0.0)
-            )
-
-            df_resultados["Qtd"] = (
-                pd.to_numeric(df_resultados["Qtd"], errors="coerce")
-                .fillna(0)
-                .astype(int)
-            )
-
-            for col in [
-                "Preço Base (R$)",
-                "Custo Unitário (R$)",
-                "Preço Otimizado (R$)",
-                "Valor Total (R$)",
-            ]:
-                df_resultados[col] = pd.to_numeric(
-                    df_resultados[col],
-                    errors="coerce",
-                ).fillna(0)
-
-            def formatar_variacao(row):
-                otimizado = row["Preço Otimizado (R$)"]
-                base = row["Preço Base (R$)"]
-
-                if base <= 0:
-                    return "➖"
-
-                variacao = round(((otimizado / base) - 1) * 100, 2)
-
-                if variacao > 0:
-                    return f"🔺 +{variacao:.1f}%"
-                if variacao < 0:
-                    return f"🔻 {variacao:.1f}%"
-                return "➖ 0.0%"
-
-            df_resultados["Variação Aplicada"] = df_resultados.apply(
-                formatar_variacao,
-                axis=1,
-            )
-
-            colunas_ordem = [
-                "Ensaio",
-                "Qtd",
-                "Prazo",
-                "Preço Base (R$)",
-                "Custo Unitário (R$)",
-                "Preço Otimizado (R$)",
-                "Variação Aplicada",
-                "Valor Total (R$)",
-            ]
-
-            df_resultados = df_resultados[colunas_ordem]
 
             df_formatado = df_resultados.style.format({
                 "Preço Base (R$)": "{:.2f}",
@@ -1579,3 +1642,30 @@ def render():
                 )
 
                 st.altair_chart(grafico, use_container_width=True)
+
+        cenarios_excel = []
+        candidatos_excel = [
+            ("Otimizado", res.get("cenario_max_prob_margem")),
+            ("Margem Minima", res.get("cenario_margem_minima")),
+            ("Cenario Manual", st.session_state.get("resultado_cenario_usuario")),
+        ]
+        for nome_aba, cenario in candidatos_excel:
+            if cenario and cenario.get("ensaios"):
+                cenarios_excel.append((nome_aba, cenario))
+
+        if cenarios_excel:
+            st.markdown("---")
+            st.download_button(
+                "📥 Baixar tabelas em Excel",
+                data=gerar_excel_cenarios(
+                    cenarios_excel,
+                    tabela_precos_global,
+                ),
+                file_name="resultados_pricing.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                key="download_tabelas_pricing_excel",
+                use_container_width=True,
+            )
