@@ -1,3 +1,4 @@
+import html
 import os
 
 # Limita bibliotecas numéricas antes que Streamlit/Pandas/HiGHS sejam importados.
@@ -42,7 +43,33 @@ def renderizar_sidebar(mostrar_inicio=False, mostrar_laboratorio=False):
         except Exception:
             st.warning("Arquivos de imagem não encontrados.")
 
-        st.caption(user_email(usuario))
+        email_usuario = user_email(usuario)
+        if hasattr(usuario, "get"):
+            nome_usuario = str(usuario.get("name", "") or "").strip()
+        else:
+            nome_usuario = str(getattr(usuario, "name", "") or "").strip()
+
+        if not nome_usuario:
+            nome_usuario = email_usuario.partition("@")[0].replace(".", " ").title()
+
+        st.markdown(
+            f"""
+            <div style="
+                color: #f4f7fa;
+                line-height: 1.45;
+                margin: 0.35rem 0 1rem;
+                overflow-wrap: anywhere;
+            ">
+                <div style="font-size: 1rem; font-weight: 600;">
+                    {html.escape(nome_usuario)}
+                </div>
+                <div style="font-size: 0.88rem; color: #d9e2ea;">
+                    {html.escape(email_usuario)}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         if st.button(
             "Sair",
             use_container_width=True,
