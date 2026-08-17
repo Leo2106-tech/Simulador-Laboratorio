@@ -8,6 +8,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import streamlit as st
 
+from auth import require_chammas_user, user_email
 from style import aplicar_estilo_personalizado
 
 
@@ -26,6 +27,8 @@ st.set_page_config(
 
 aplicar_estilo_personalizado()
 
+usuario = require_chammas_user()
+
 
 def abrir_pagina(nome):
     """Navega na mesma aba usando o roteamento nativo do Streamlit."""
@@ -38,6 +41,14 @@ def renderizar_sidebar(mostrar_inicio=False, mostrar_laboratorio=False):
             st.image("assets/CHMMS_logo_reduzida-16.png", width=180)
         except Exception:
             st.warning("Arquivos de imagem não encontrados.")
+
+        st.caption(user_email(usuario))
+        if st.button(
+            "Sair",
+            use_container_width=True,
+            key="logout",
+        ):
+            st.logout()
 
         if mostrar_inicio and st.button(
             "⌂ Início",
